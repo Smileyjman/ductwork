@@ -49,6 +49,8 @@ Ductwork runs AI agents that can execute shell commands, read/write files, and c
 go install github.com/dneil5648/ductwork/cmd/ductwork@latest
 ```
 
+> **Note:** You need the full path including `/cmd/ductwork` — the binary lives there, not at the module root.
+
 This puts the `ductwork` binary in your `$GOPATH/bin` (or `$HOME/go/bin`). Make sure that's in your `$PATH`.
 
 ### Option 2: Build from source
