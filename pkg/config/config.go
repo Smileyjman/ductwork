@@ -183,6 +183,11 @@ func LoadConfig(agentDir string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
+	// Environment variable override: DUCTWORK_MODEL takes priority over config file
+	if envModel := os.Getenv("DUCTWORK_MODEL"); envModel != "" {
+		cfg.DefaultModel = envModel
+	}
+
 	// Resolve relative paths to absolute
 	cfg.RootDir = absDir
 	cfg.TasksDir = filepath.Join(absDir, cfg.TasksDir)

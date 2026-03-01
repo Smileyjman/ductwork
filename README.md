@@ -1,45 +1,45 @@
 # Ductwork
 
-A Go-based platform for running AI agents on schedules with tasks, skills, and persistent memory. Built on the Anthropic Claude API and Go's concurrency primitives.
+A Go-based platform for running AI agents on schedules with tasks, skills, and persistent memory. Single binary, three operating modes — from single-node to distributed.
 
-## Architecture
+## How It Works
+
+Ductwork runs AI agents that can execute shell commands, read/write files, and create new tasks. You define tasks as JSON, and ductwork handles scheduling, execution, retries, security, and history.
+
+**Three operating modes:**
 
 ```
-                  ┌──────────────────────────────────────────────────┐
-  ductwork start  │                     MAIN                         │
-  ─────────────►  │  EnsureDir → Load config → Create agent → Boot   │
-                  └────┬──────────────┬──────────────┬───────────────┘
-                       │              │              │
-               ┌───────▼──────┐  ┌────▼──────────┐  ┌▼──────────────┐
-               │  SCHEDULER   │  │ ORCHESTRATOR   │  │  HTTP API     │
-               │  goroutine   │  │ goroutine      │  │  :8080        │
-               │              │  │                │  │               │
-               │  Min-heap    │  │ Reads taskChan │  │ GET /tasks    │
-               │  of tasks    │  │ Spawns agents  │  │ POST /run     │
-               │  by NextRun  │  │                │  │ POST /spawn   │
-               │              │  │ ┌────────────┐ │  │ GET /status   │
-               │  Timer fires │  │ │go RunTask()│ │  │               │
-               │  ──push──►───┼──┼►│ goroutine  │ │  │  Calls into   │
-               │   taskChan   │  │ └────────────┘ │  │  orchestrator │
-               │              │  │                │  │  & scheduler  │
-               │  addChan ◄───┼──┼── runtime adds │  │───────────►───┤
-               └──────────────┘  └────────────────┘  └───────────────┘
-                                         ▲                   ▲
-  ductwork run <task>                    │                   │
-  ──────────── RunImmediate(t) ─────────┘                   │
-                                                            │
-  ductwork spawn "..."                                      │
-  ──────────── SpawnAdhoc(prompt) ──────────────────────────┘
-                                                            │
-  Future UI / External Systems                              │
-  ──────────── HTTP requests ───────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  STANDALONE (default)                                           │
+│  Everything in one process. Zero config.                        │
+│                                                                 │
+│  ┌───────────┐    ┌──────────────┐    ┌──────────┐             │
+│  │ Scheduler │───►│ Orchestrator │───►│  Agent   │             │
+│  │ (cron)    │    │ (dispatch)   │    │ (Claude) │             │
+│  └───────────┘    └──────────────┘    └──────────┘             │
+│                          ▲                                      │
+│  ┌──────────┐            │                                      │
+│  │ REST API │────────────┘                                      │
+│  │ :8080    │                                                   │
+│  └──────────┘                                                   │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  CONTROL PLANE + WORKERS (multi-node)                           │
+│                                                                 │
+│  Control Plane                    Workers (any machine)         │
+│  ┌───────────┐                   ┌────────────────────┐        │
+│  │ Scheduler │───►┌────────┐     │  Worker 1          │        │
+│  └───────────┘    │  Task  │◄────│  polls /api/worker │        │
+│  ┌──────────┐     │  Queue │     │  executes locally  │        │
+│  │ REST API │───► │        │     └────────────────────┘        │
+│  │ :8080    │     └────────┘     ┌────────────────────┐        │
+│  └──────────┘         ▲         │  Worker 2          │        │
+│                       └──────────│  polls /api/worker │        │
+│                                  │  executes locally  │        │
+│                                  └────────────────────┘        │
+└─────────────────────────────────────────────────────────────────┘
 ```
-
-**Three goroutines** coordinate via channels:
-
-- **Scheduler** — min-heap priority queue sorted by next run time. Sets a timer for the soonest task, fires it to the task channel, reschedules, and repeats.
-- **Orchestrator** — reads from the task channel, spawns an agent goroutine per task. Includes concurrency limits via semaphore and retry with exponential backoff for transient errors.
-- **API** — REST endpoints for triggering tasks, spawning ad-hoc agents, inspecting scheduler state, and viewing run history.
 
 ## Install
 
@@ -64,7 +64,7 @@ go build -o ductwork ./cmd/ductwork
 - Go 1.23+
 - An [Anthropic API key](https://console.anthropic.com/)
 
-### Quick Start
+## Quick Start
 
 ```bash
 # Set your API key
@@ -86,6 +86,33 @@ ductwork build "Monitor Bitcoin news every hour"
 ductwork start
 ```
 
+## Model Configuration
+
+Ductwork uses Anthropic Claude models. The model can be set at multiple levels — highest priority wins:
+
+| Priority | Method | Example |
+|----------|--------|---------|
+| 1 (highest) | `--model` CLI flag | `ductwork start --model claude-haiku-3` |
+| 2 | `DUCTWORK_MODEL` env var | `export DUCTWORK_MODEL=claude-opus-4` |
+| 3 | Per-task `model` field | `"model": "claude-haiku-3"` in task JSON |
+| 4 (lowest) | `default_model` in config | `"default_model": "claude-sonnet-4-6"` in `.agent/config.json` |
+
+**Examples:**
+
+```bash
+# Use a cheaper model for a quick task
+ductwork spawn --model claude-haiku-3 "What is 2+2?"
+
+# Set the default model via env var (useful in Docker/CI)
+export DUCTWORK_MODEL=claude-sonnet-4-6
+ductwork start
+
+# Override for a specific run
+ductwork run hello-world --model claude-opus-4
+```
+
+Per-task model overrides in the task JSON always take precedence over the global default, but the `--model` CLI flag overrides everything.
+
 ## CLI
 
 ```
@@ -101,9 +128,44 @@ ductwork history [task-name]      # shows recent run history
 
 ### `ductwork start`
 
-Boots the scheduler, orchestrator, and HTTP API as a long-running process. Loads all task definitions from `.agent/tasks/`, feeds scheduled ones into the min-heap, and begins firing them on interval.
+Boots the system as a long-running process. Graceful shutdown via `Ctrl+C`.
 
-Graceful shutdown via `Ctrl+C` (`SIGINT`) or `SIGTERM`.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mode` | `standalone` | `standalone`, `control`, or `worker` |
+| `--model` | | Override default model |
+| `--control` | | Control plane URL (required for `worker` mode) |
+| `--worker-id` | auto | Worker identifier (auto-generated from hostname + PID) |
+| `--poll-interval` | `5s` | How often workers poll for tasks |
+
+**Standalone mode** (default — everything in one process):
+```bash
+ductwork start
+```
+
+**Control plane mode** (API + scheduler + task queue):
+```bash
+ductwork start --mode=control
+```
+
+**Worker mode** (polls control plane, executes tasks):
+```bash
+ductwork start --mode=worker --control=http://control-host:8080
+```
+
+### `ductwork run`
+
+```bash
+ductwork run hello-world              # uses default model
+ductwork run hello-world --model claude-haiku-3  # override model
+```
+
+### `ductwork spawn`
+
+```bash
+ductwork spawn "What is 2+2?"
+ductwork spawn --model claude-opus-4 "Write a haiku about Go"
+```
 
 ### `ductwork list`
 
@@ -125,11 +187,13 @@ example-scheduled-1709312100000      example-scheduled    failed     1.5s       
 
 ## REST API
 
-Starts automatically on `ductwork start`. Default port: `8080` (configurable in `.agent/config.json`).
+Default port: `8080` (configurable in `.agent/config.json`).
+
+### Core Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/health` | Health check |
+| `GET` | `/api/health` | Health check (includes queue stats in control mode) |
 | `GET` | `/api/tasks` | List all task definitions |
 | `GET` | `/api/tasks/{name}` | Get a specific task |
 | `POST` | `/api/tasks/{name}/run` | Trigger a task immediately |
@@ -138,6 +202,14 @@ Starts automatically on `ductwork start`. Default port: `8080` (configurable in 
 | `POST` | `/api/scheduler/add` | Add a task to the scheduler at runtime |
 | `GET` | `/api/runs` | Recent run history (last 50) |
 | `GET` | `/api/runs/{task-name}` | Run history for a specific task |
+
+### Control Plane Endpoints (only available in `--mode=control`)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/worker/poll` | Worker polls for a task — body: `{"worker_id": "..."}` |
+| `POST` | `/api/worker/result` | Worker reports result — body: `{"worker_id": "...", "result": {...}}` |
+| `GET` | `/api/workers` | List registered workers and queue stats |
 
 ### Examples
 
@@ -161,11 +233,59 @@ curl localhost:8080/api/scheduler/status
 
 # View run history
 curl localhost:8080/api/runs
+
+# List workers (control mode only)
+curl localhost:8080/api/workers
 ```
+
+## Multi-Node with Docker
+
+Ductwork includes a `Dockerfile` and `docker-compose.yml` for running a control plane with multiple workers.
+
+### Quick Start
+
+```bash
+# Set your API key
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# Start 1 control plane + 2 workers
+docker compose up --build
+
+# In another terminal:
+curl localhost:8080/api/workers        # see 2 workers registered
+curl -X POST localhost:8080/api/tasks/hello-world/run  # trigger a task
+curl localhost:8080/api/runs           # see the result
+```
+
+### docker-compose.yml
+
+```yaml
+services:
+  control:
+    build: .
+    command: ["start", "--mode=control"]
+    ports: ["8080:8080"]
+    volumes: ["./.agent:/app/.agent"]
+    environment: [ANTHROPIC_API_KEY]
+
+  worker-1:
+    build: .
+    command: ["start", "--mode=worker", "--control=http://control:8080", "--worker-id=worker-1"]
+    depends_on: [control]
+    environment: [ANTHROPIC_API_KEY]
+
+  worker-2:
+    build: .
+    command: ["start", "--mode=worker", "--control=http://control:8080", "--worker-id=worker-2"]
+    depends_on: [control]
+    environment: [ANTHROPIC_API_KEY]
+```
+
+The control plane mounts `.agent/` for task definitions, skills, and memory. Workers don't need it — they receive everything they need from the control plane in the task assignment.
 
 ## `.agent/` Directory
 
-Auto-created on first boot. All task paths are relative to this root.
+Auto-created on first boot. All paths are relative to this root.
 
 ```
 .agent/
@@ -247,7 +367,7 @@ Tasks are JSON files in `.agent/tasks/`. Two run modes:
 | `skills` | map[string]string | Skill name → file path (loaded into system prompt) |
 | `memory_dir` | string | Directory for persistent memory across runs |
 | `run_mode` | string | `"scheduled"` or `"immediate"` |
-| `model` | string | Model override (empty = use default from config) |
+| `model` | string | Model override (empty = use default) |
 | `schedule` | string | Go duration string: `"30m"`, `"1h"`, `"24h"` |
 | `max_retries` | int | Override default retry count (0 = use config default) |
 | `retry_backoff` | string | Override base backoff duration (e.g. `"5s"`) |
@@ -283,11 +403,10 @@ Security rules are defined in `.agent/security.json`. They control which tools e
 
 ```json
 {
-  "default": {
-    "allowed_tools": ["bash", "read_file", "write_file", "create_task", "save_script"],
-    "path_whitelist": ["."],
-    "bash_blacklist": ["rm -rf /", "sudo"]
-  }
+  "default_tool_permissions": {
+    "allowed_tools": ["bash", "read_file", "write_file", "create_task", "save_script"]
+  },
+  "task_overrides": {}
 }
 ```
 
@@ -295,11 +414,15 @@ Task-specific overrides can restrict permissions further:
 
 ```json
 {
-  "default": { ... },
-  "tasks": {
+  "default_tool_permissions": {
+    "allowed_tools": ["bash", "read_file", "write_file", "create_task", "save_script"]
+  },
+  "task_overrides": {
     "read-only-task": {
       "allowed_tools": ["read_file"],
-      "path_whitelist": [".agent/memory"]
+      "path_boundaries": {
+        "allowed_read_paths": [".agent/memory/**"]
+      }
     }
   }
 }
@@ -323,23 +446,33 @@ The agent has five tools, defined in `.agent/tools.json`:
 ductwork/
 ├── cmd/
 │   └── ductwork/
-│       └── main.go              # Cobra CLI entry point (go install target)
+│       └── main.go              # Cobra CLI (3 modes: standalone, control, worker)
 ├── pkg/
 │   ├── agent/
-│   │   ├── agent.go             # Core agent runtime (Spawn, RunTask, runLoop)
+│   │   ├── agent.go             # Core agent runtime (Spawn, RunTask, RunTaskWithPreloaded)
 │   │   └── tools.json           # Tool definitions (embedded via //go:embed)
 │   ├── tasks/
 │   │   └── task.go              # Task struct, loaders, skill/memory pre-loading
 │   ├── scheduler/
 │   │   └── scheduler.go         # Min-heap priority queue scheduler
 │   ├── orchestrator/
-│   │   ├── orchestrator.go      # Task channel consumer, agent spawner, history, retry
+│   │   ├── orchestrator.go      # Task dispatch via Worker interface, retries, history
 │   │   └── retry.go             # Error classification, exponential backoff
+│   ├── worker/
+│   │   ├── worker.go            # Worker interface, TaskAssignment, TaskResult types
+│   │   └── local.go             # LocalWorker — in-process execution (standalone mode)
+│   ├── controlplane/
+│   │   ├── queue.go             # TaskQueue — thread-safe FIFO for task assignments
+│   │   ├── results.go           # ResultCollector — routes results to waiting goroutines
+│   │   ├── registry.go          # WorkerRegistry — tracks workers via heartbeats
+│   │   └── remote.go            # RemoteWorker — enqueues tasks for HTTP workers
+│   ├── workerclient/
+│   │   └── client.go            # Worker-side HTTP poll loop and task execution
 │   ├── config/
-│   │   ├── config.go            # .agent/ auto-init, config loading, path resolution
+│   │   ├── config.go            # .agent/ auto-init, config loading, env var support
 │   │   └── default_tools.json   # Default tools.json (embedded for bootstrap)
 │   ├── api/
-│   │   └── api.go               # HTTP REST API
+│   │   └── api.go               # REST API (core + control plane endpoints)
 │   ├── security/
 │   │   └── security.go          # Enforcer, tool whitelist, path boundaries
 │   ├── dependencies/
@@ -351,6 +484,8 @@ ductwork/
 │   └── taskbuilder/
 │       └── taskbuilder.go       # Task validation and creation
 ├── .agent/                      # Runtime directory (auto-created)
+├── Dockerfile                   # Multi-stage build (Go builder → Alpine runtime)
+├── docker-compose.yml           # 1 control plane + 2 workers demo
 ├── go.mod
 └── README.md
 ```
@@ -362,3 +497,5 @@ ductwork/
 | [anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go) v1.26.0 | Claude API client |
 | [cobra](https://github.com/spf13/cobra) v1.10.2 | CLI framework |
 | Go standard library | `container/heap`, `net/http`, `context`, `os/exec`, `encoding/json`, `log/slog` |
+
+No additional dependencies for multi-node — HTTP/JSON transport uses only the standard library.

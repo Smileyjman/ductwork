@@ -70,7 +70,7 @@ func initCmd() *cobra.Command {
 //   - control: control plane with task queue, workers poll via HTTP
 //   - worker: polls a control plane for tasks, executes locally
 func startCmd() *cobra.Command {
-	var mode, controlURL, workerID string
+	var mode, controlURL, workerID, model string
 	var pollInterval time.Duration
 
 	cmd := &cobra.Command{
@@ -89,9 +89,9 @@ func startCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch mode {
 			case "standalone", "":
-				return startStandalone()
+				return startStandalone(model)
 			case "control":
-				return startControlPlane()
+				return startControlPlane(model)
 			case "worker":
 				if controlURL == "" {
 					return fmt.Errorf("--control is required in worker mode")
@@ -108,6 +108,7 @@ func startCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&mode, "mode", "standalone", "Run mode: standalone, control, or worker")
+	cmd.Flags().StringVar(&model, "model", "", "Override default model (e.g. claude-sonnet-4-6, claude-haiku-3)")
 	cmd.Flags().StringVar(&controlURL, "control", "", "Control plane URL (required for worker mode)")
 	cmd.Flags().StringVar(&workerID, "worker-id", "", "Worker ID (auto-generated if empty)")
 	cmd.Flags().DurationVar(&pollInterval, "poll-interval", 5*time.Second, "Poll interval for worker mode")
@@ -117,10 +118,15 @@ func startCmd() *cobra.Command {
 
 // startStandalone runs everything in one process (default mode).
 // Identical to the original single-node behavior.
-func startStandalone() error {
+func startStandalone(modelOverride string) error {
 	cfg, err := config.LoadConfig(agentDir)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// CLI --model flag takes highest priority
+	if modelOverride != "" {
+		cfg.DefaultModel = modelOverride
 	}
 
 	cleanup, err := logging.Setup(cfg.LogsDir, cfg.Debug)
@@ -183,10 +189,15 @@ func startStandalone() error {
 
 // startControlPlane runs the API, scheduler, and task queue.
 // Workers connect via HTTP to poll for tasks and report results.
-func startControlPlane() error {
+func startControlPlane(modelOverride string) error {
 	cfg, err := config.LoadConfig(agentDir)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// CLI --model flag takes highest priority
+	if modelOverride != "" {
+		cfg.DefaultModel = modelOverride
 	}
 
 	cleanup, err := logging.Setup(cfg.LogsDir, cfg.Debug)
@@ -308,7 +319,9 @@ func waitForShutdown(cancel context.CancelFunc) error {
 
 // runCmd loads and runs a specific named task (immediate mode)
 func runCmd() *cobra.Command {
-	return &cobra.Command{
+	var model string
+
+	cmd := &cobra.Command{
 		Use:   "run [task-name]",
 		Short: "Run a defined task by name",
 		Args:  cobra.ExactArgs(1),
@@ -318,6 +331,11 @@ func runCmd() *cobra.Command {
 			cfg, err := config.LoadConfig(agentDir)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			// CLI --model flag takes highest priority
+			if model != "" {
+				cfg.DefaultModel = model
 			}
 
 			// Setup logging
@@ -392,11 +410,16 @@ func runCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&model, "model", "", "Override default model (e.g. claude-sonnet-4-6, claude-haiku-3)")
+	return cmd
 }
 
 // spawnCmd runs an ad-hoc one-off task with a raw prompt
 func spawnCmd() *cobra.Command {
-	return &cobra.Command{
+	var model string
+
+	cmd := &cobra.Command{
 		Use:   "spawn [prompt]",
 		Short: "Run an ad-hoc agent with a raw prompt",
 		Args:  cobra.ExactArgs(1),
@@ -406,6 +429,11 @@ func spawnCmd() *cobra.Command {
 			cfg, err := config.LoadConfig(agentDir)
 			if err != nil {
 				return fmt.Errorf("failed to setup config: %w", err)
+			}
+
+			// CLI --model flag takes highest priority
+			if model != "" {
+				cfg.DefaultModel = model
 			}
 
 			// Setup logging
@@ -461,6 +489,9 @@ func spawnCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&model, "model", "", "Override default model (e.g. claude-sonnet-4-6, claude-haiku-3)")
+	return cmd
 }
 
 // listCmd lists all defined tasks from .agent/tasks/
