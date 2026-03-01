@@ -1,0 +1,112 @@
+[
+  {
+    "name": "bash",
+    "description": "Execute a bash command in the shell. Use this to run any command-line operation.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "The bash command to execute"
+        }
+      },
+      "required": ["command"]
+    }
+  },
+  {
+    "name": "read_file",
+    "description": "Read the contents of a file at the given path.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file path to read"
+        }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "write_file",
+    "description": "Write content to a file at the given path. Creates the file if it does not exist, overwrites if it does.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file path to write to"
+        },
+        "content": {
+          "type": "string",
+          "description": "The content to write to the file"
+        }
+      },
+      "required": ["path", "content"]
+    }
+  },
+  {
+    "name": "create_task",
+    "description": "Create a new task definition. Validates the input and writes a JSON task file to the tasks directory. The task can then be run via CLI or scheduled.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Task name in lowercase kebab-case (e.g. 'health-check', 'deploy-staging')"
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this task does"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "The instruction prompt the agent will receive when running this task"
+        },
+        "run_mode": {
+          "type": "string",
+          "description": "How the task runs: 'scheduled' (cron-like) or 'immediate' (on-demand)"
+        },
+        "schedule": {
+          "type": "string",
+          "description": "How often to run (e.g. '30m', '1h', '24h'). Required if run_mode is 'scheduled'"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model override for this task (optional, empty uses agent default)"
+        },
+        "memory_dir": {
+          "type": "string",
+          "description": "Directory for persistent memory across runs (optional)"
+        },
+        "register_scheduled": {
+          "type": "string",
+          "description": "If 'true' and task is scheduled, register it with the running scheduler immediately"
+        }
+      },
+      "required": ["name", "description", "prompt", "run_mode"]
+    }
+  },
+  {
+    "name": "save_script",
+    "description": "Save a reusable script to the scripts directory. Sets executable permissions. Scripts can be invoked later via the bash tool.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Script filename (e.g. 'check-disk.sh', 'parse-data.py')"
+        },
+        "content": {
+          "type": "string",
+          "description": "Script content"
+        },
+        "description": {
+          "type": "string",
+          "description": "What the script does (saved as a comment header)"
+        }
+      },
+      "required": ["name", "content"]
+    }
+  }
+]

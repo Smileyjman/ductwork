@@ -1,0 +1,10 @@
+{
+  "name": "bitcoin-news-monitor",
+  "description": "Fetches the latest Bitcoin news headlines (from CryptoCompare) and BTC spot price + 24h change (from CoinGecko) every 20 minutes. Tracks which articles are new since the last run and writes a formatted Markdown report to memory. No API keys required.",
+  "prompt": "Run the Bitcoin news monitor script and report the results.\n\nExecute the following command:\n  python3 .agent/scripts/bitcoin-news-check.py\n\nThe script will:\n1. Fetch the current BTC/USD price, 24h change, volume, and market cap from CoinGecko.\n2. Fetch the 10 latest Bitcoin news articles from CryptoCompare.\n3. Compare against previously seen articles (stored in memory) to highlight only NEW headlines.\n4. Write a full Markdown report to memory/bitcoin_news_report.md.\n5. Print the report to stdout (visible in task logs).\n\nAfter running the script, summarize:\n- Current BTC price and 24h change direction\n- How many new articles were found\n- The titles of any new articles (if any)\n\nIf the script errors, report the error clearly.",
+  "skills": null,
+  "memory_dir": "memory/bitcoin-news",
+  "run_mode": "scheduled",
+  "model": "",
+  "schedule": "5m"
+}

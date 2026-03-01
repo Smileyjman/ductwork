@@ -1,0 +1,36 @@
+# Binaries
+ductwork
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test output
+*.test
+*.out
+coverage.html
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Runtime directory (contains user-specific config, logs, memory, etc.)
+.agent/logs/
+.agent/memory/
+.agent/history/
+.agent/scripts/
+
+# Agent-generated runtime files
+memory/
+seen_articles.json
+bitcoin_news_report.md
+
+# Claude Code
+.claude/

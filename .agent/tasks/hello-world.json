@@ -1,0 +1,10 @@
+{
+  "name": "hello-world",
+  "description": "A simple test task that creates a file and reads it back",
+  "prompt": "Create a file called hello.txt with 'hello world' in it, then read it back and tell me what it says. Save a summary of what you did to your memory directory.",
+  "skills": {},
+  "memory_dir": "memory/hello-world",
+  "run_mode": "immediate",
+  "model": "",
+  "schedule": ""
+}

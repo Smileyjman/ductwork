@@ -1,0 +1,10 @@
+{
+  "name": "example-scheduled",
+  "description": "Example scheduled task that runs every 30 minutes",
+  "prompt": "Check the current time and write it to a log file in your memory directory called time-check.txt. Include the timestamp and a short note.",
+  "skills": {},
+  "memory_dir": "memory/example-scheduled",
+  "run_mode": "scheduled",
+  "model": "",
+  "schedule": "30m"
+}
