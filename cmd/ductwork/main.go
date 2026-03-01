@@ -8,10 +8,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/dneil5648/ductwork/pkg/agent"
 	"github.com/dneil5648/ductwork/pkg/api"
 	"github.com/dneil5648/ductwork/pkg/config"
+	"github.com/dneil5648/ductwork/pkg/controlplane"
 	"github.com/dneil5648/ductwork/pkg/dependencies"
 	"github.com/dneil5648/ductwork/pkg/history"
 	"github.com/dneil5648/ductwork/pkg/logging"
@@ -19,6 +21,8 @@ import (
 	"github.com/dneil5648/ductwork/pkg/scheduler"
 	"github.com/dneil5648/ductwork/pkg/security"
 	task "github.com/dneil5648/ductwork/pkg/tasks"
+	"github.com/dneil5648/ductwork/pkg/worker"
+	"github.com/dneil5648/ductwork/pkg/workerclient"
 
 	"github.com/spf13/cobra"
 )
@@ -61,95 +65,245 @@ func initCmd() *cobra.Command {
 	}
 }
 
-// startCmd boots the scheduler, orchestrator, and API server as a long-running process
+// startCmd boots the system in one of three modes:
+//   - standalone (default): scheduler + orchestrator + API, all in-process
+//   - control: control plane with task queue, workers poll via HTTP
+//   - worker: polls a control plane for tasks, executes locally
 func startCmd() *cobra.Command {
-	return &cobra.Command{
+	var mode, controlURL, workerID string
+	var pollInterval time.Duration
+
+	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Start the scheduler, orchestrator, and API server",
-		Long:  "Boots all goroutines: scheduler polls and fires tasks, orchestrator spawns agents, API server listens for requests.",
+		Short: "Start ductwork in standalone, control plane, or worker mode",
+		Long: `Starts ductwork in one of three modes:
+
+  standalone (default):  Everything in one process — scheduler, orchestrator, API server.
+                         This is the simple, zero-config mode.
+
+  control:               Control plane mode — API server, scheduler, and task queue.
+                         Workers connect via HTTP to pick up and execute tasks.
+
+  worker:                Worker mode — polls a control plane for task assignments,
+                         executes them locally, reports results back.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Load config (auto-creates .agent/ if missing)
-			cfg, err := config.LoadConfig(agentDir)
-			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
-			}
-
-			// Setup structured logging
-			cleanup, err := logging.Setup(cfg.LogsDir, cfg.Debug)
-			if err != nil {
-				return fmt.Errorf("failed to setup logging: %w", err)
-			}
-			defer cleanup()
-
-			// Load security config
-			secCfg, err := security.LoadSecurityConfig(cfg.SecurityFile)
-			if err != nil {
-				return fmt.Errorf("failed to load security config: %w", err)
-			}
-			slog.Info("loaded security config", "file", cfg.SecurityFile)
-
-			// Load dependency config
-			depCfg, err := dependencies.LoadDependencies(cfg.DependenciesFile)
-			if err != nil {
-				return fmt.Errorf("failed to load dependencies config: %w", err)
-			}
-			slog.Info("loaded dependencies config", "runtimes", len(depCfg.Runtimes))
-
-			// Create history store
-			historyStore, err := history.NewFileStore(cfg.HistoryDir)
-			if err != nil {
-				return fmt.Errorf("failed to create history store: %w", err)
-			}
-			slog.Info("loaded history store", "dir", cfg.HistoryDir)
-
-			// Create orchestrator (owns the task channel, creates per-task agents)
-			orch := orchestrator.NewOrchestrator(cfg, secCfg, depCfg, historyStore, 10)
-
-			// Create scheduler (writes to orchestrator's channel)
-			sched := scheduler.NewScheduler(orch.TaskChan)
-
-			// Load all task definitions and feed scheduled ones to the scheduler
-			tasks, err := task.LoadTasks(cfg.TasksDir)
-			if err != nil {
-				slog.Warn("could not load tasks", "error", err)
-				tasks = []task.Task{}
-			}
-
-			if len(tasks) > 0 {
-				if err := sched.LoadTasks(tasks); err != nil {
-					return fmt.Errorf("failed to load tasks into scheduler: %w", err)
+			switch mode {
+			case "standalone", "":
+				return startStandalone()
+			case "control":
+				return startControlPlane()
+			case "worker":
+				if controlURL == "" {
+					return fmt.Errorf("--control is required in worker mode")
 				}
-			}
-
-			slog.Info("loaded tasks", "count", len(tasks), "dir", cfg.TasksDir)
-
-			// Set up context with cancellation for graceful shutdown
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			// Start goroutines
-			go orch.Run(ctx)
-			go sched.Run(ctx)
-			go func() {
-				if err := api.Start(cfg, orch, sched, historyStore); err != nil {
-					slog.Error("API server error", "error", err)
+				if workerID == "" {
+					hostname, _ := os.Hostname()
+					workerID = fmt.Sprintf("worker-%s-%d", hostname, os.Getpid())
 				}
-			}()
-
-			slog.Info("ductwork running", "api_port", cfg.APIPort)
-			fmt.Println("Press Ctrl+C to stop")
-
-			// Block until shutdown signal
-			sigChan := make(chan os.Signal, 1)
-			signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-			sig := <-sigChan
-
-			slog.Info("received shutdown signal", "signal", sig)
-			cancel()
-
-			return nil
+				return startWorker(controlURL, workerID, pollInterval)
+			default:
+				return fmt.Errorf("unknown mode: %q (use standalone, control, or worker)", mode)
+			}
 		},
 	}
+
+	cmd.Flags().StringVar(&mode, "mode", "standalone", "Run mode: standalone, control, or worker")
+	cmd.Flags().StringVar(&controlURL, "control", "", "Control plane URL (required for worker mode)")
+	cmd.Flags().StringVar(&workerID, "worker-id", "", "Worker ID (auto-generated if empty)")
+	cmd.Flags().DurationVar(&pollInterval, "poll-interval", 5*time.Second, "Poll interval for worker mode")
+
+	return cmd
+}
+
+// startStandalone runs everything in one process (default mode).
+// Identical to the original single-node behavior.
+func startStandalone() error {
+	cfg, err := config.LoadConfig(agentDir)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	cleanup, err := logging.Setup(cfg.LogsDir, cfg.Debug)
+	if err != nil {
+		return fmt.Errorf("failed to setup logging: %w", err)
+	}
+	defer cleanup()
+
+	secCfg, err := security.LoadSecurityConfig(cfg.SecurityFile)
+	if err != nil {
+		return fmt.Errorf("failed to load security config: %w", err)
+	}
+	slog.Info("loaded security config", "file", cfg.SecurityFile)
+
+	depCfg, err := dependencies.LoadDependencies(cfg.DependenciesFile)
+	if err != nil {
+		return fmt.Errorf("failed to load dependencies config: %w", err)
+	}
+	slog.Info("loaded dependencies config", "runtimes", len(depCfg.Runtimes))
+
+	historyStore, err := history.NewFileStore(cfg.HistoryDir)
+	if err != nil {
+		return fmt.Errorf("failed to create history store: %w", err)
+	}
+	slog.Info("loaded history store", "dir", cfg.HistoryDir)
+
+	// Standalone mode: LocalWorker executes tasks in-process
+	localWorker := worker.NewLocalWorker(cfg, secCfg)
+	orch := orchestrator.NewOrchestrator(cfg, secCfg, depCfg, historyStore, localWorker, 10)
+	sched := scheduler.NewScheduler(orch.TaskChan)
+
+	tasks, err := task.LoadTasks(cfg.TasksDir)
+	if err != nil {
+		slog.Warn("could not load tasks", "error", err)
+		tasks = []task.Task{}
+	}
+	if len(tasks) > 0 {
+		if err := sched.LoadTasks(tasks); err != nil {
+			return fmt.Errorf("failed to load tasks into scheduler: %w", err)
+		}
+	}
+	slog.Info("loaded tasks", "count", len(tasks), "dir", cfg.TasksDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go orch.Run(ctx)
+	go sched.Run(ctx)
+	go func() {
+		if err := api.Start(cfg, orch, sched, historyStore); err != nil {
+			slog.Error("API server error", "error", err)
+		}
+	}()
+
+	slog.Info("ductwork running", "mode", "standalone", "api_port", cfg.APIPort)
+	fmt.Println("Press Ctrl+C to stop")
+
+	return waitForShutdown(cancel)
+}
+
+// startControlPlane runs the API, scheduler, and task queue.
+// Workers connect via HTTP to poll for tasks and report results.
+func startControlPlane() error {
+	cfg, err := config.LoadConfig(agentDir)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	cleanup, err := logging.Setup(cfg.LogsDir, cfg.Debug)
+	if err != nil {
+		return fmt.Errorf("failed to setup logging: %w", err)
+	}
+	defer cleanup()
+
+	secCfg, err := security.LoadSecurityConfig(cfg.SecurityFile)
+	if err != nil {
+		return fmt.Errorf("failed to load security config: %w", err)
+	}
+
+	depCfg, err := dependencies.LoadDependencies(cfg.DependenciesFile)
+	if err != nil {
+		return fmt.Errorf("failed to load dependencies config: %w", err)
+	}
+
+	historyStore, err := history.NewFileStore(cfg.HistoryDir)
+	if err != nil {
+		return fmt.Errorf("failed to create history store: %w", err)
+	}
+
+	// Control plane infrastructure
+	taskQueue := controlplane.NewTaskQueue()
+	resultCollector := controlplane.NewResultCollector()
+	workerRegistry := controlplane.NewWorkerRegistry(30 * time.Second)
+
+	// RemoteWorker enqueues tasks → workers poll via HTTP → results flow back
+	remoteWorker := controlplane.NewRemoteWorker(taskQueue, resultCollector)
+
+	orch := orchestrator.NewOrchestrator(cfg, secCfg, depCfg, historyStore, remoteWorker, 10)
+	sched := scheduler.NewScheduler(orch.TaskChan)
+
+	tasks, err := task.LoadTasks(cfg.TasksDir)
+	if err != nil {
+		slog.Warn("could not load tasks", "error", err)
+		tasks = []task.Task{}
+	}
+	if len(tasks) > 0 {
+		if err := sched.LoadTasks(tasks); err != nil {
+			return fmt.Errorf("failed to load tasks into scheduler: %w", err)
+		}
+	}
+	slog.Info("loaded tasks", "count", len(tasks), "dir", cfg.TasksDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go orch.Run(ctx)
+	go sched.Run(ctx)
+	go func() {
+		if err := api.Start(cfg, orch, sched, historyStore,
+			api.WithControlPlane(taskQueue, resultCollector, workerRegistry)); err != nil {
+			slog.Error("API server error", "error", err)
+		}
+	}()
+
+	slog.Info("ductwork running", "mode", "control", "api_port", cfg.APIPort)
+	fmt.Println("Control plane running. Workers can connect via HTTP.")
+	fmt.Println("Press Ctrl+C to stop")
+
+	return waitForShutdown(cancel)
+}
+
+// startWorker runs a worker that polls the control plane for tasks.
+func startWorker(controlURL, workerID string, pollInterval time.Duration) error {
+	// Workers still use .agent/ for logging (if available)
+	cfg, err := config.LoadConfig(agentDir)
+	if err != nil {
+		// Worker mode can run without .agent/ directory
+		slog.Info("no .agent/ directory found, using defaults for logging")
+		cfg = &config.Config{
+			LogsDir: "logs",
+			Debug:   false,
+		}
+	}
+
+	cleanup, err := logging.Setup(cfg.LogsDir, cfg.Debug)
+	if err != nil {
+		// Non-fatal: just log to stderr
+		slog.Warn("failed to setup file logging, using stderr only", "error", err)
+		cleanup = func() {}
+	}
+	defer cleanup()
+
+	client := workerclient.NewClient(workerID, controlURL, pollInterval)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := client.Run(ctx); err != nil {
+			slog.Error("worker client error", "error", err)
+		}
+	}()
+
+	slog.Info("ductwork running", "mode", "worker",
+		"worker_id", workerID,
+		"control", controlURL,
+		"poll_interval", pollInterval)
+	fmt.Printf("Worker %s connected to %s\n", workerID, controlURL)
+	fmt.Println("Press Ctrl+C to stop")
+
+	return waitForShutdown(cancel)
+}
+
+// waitForShutdown blocks until SIGINT or SIGTERM, then calls cancel.
+func waitForShutdown(cancel context.CancelFunc) error {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-sigChan
+
+	slog.Info("received shutdown signal", "signal", sig)
+	cancel()
+
+	return nil
 }
 
 // runCmd loads and runs a specific named task (immediate mode)

@@ -113,6 +113,36 @@ func (a *Agent) RunTask(ctx context.Context, t task.Task) (*RunResult, error) {
 	return a.runLoop(ctx, systemPrompt, userMessage)
 }
 
+// RunTaskWithPreloaded is like RunTask but accepts pre-loaded skills and memory
+// content instead of reading from the filesystem. Used by remote workers that
+// don't have access to the .agent/ directory.
+func (a *Agent) RunTaskWithPreloaded(ctx context.Context, t task.Task, skillsContent, memoryContent string) (*RunResult, error) {
+	model := a.Model
+	if t.Model != "" {
+		model = t.Model
+	}
+
+	systemPrompt := a.SystemPrompt
+	if skillsContent != "" {
+		systemPrompt += "\n" + skillsContent
+	}
+
+	userMessage := t.Prompt
+	if memoryContent != "" {
+		userMessage = memoryContent + "\n---\n\n" + t.Prompt
+	}
+
+	if t.MemoryDir != "" {
+		systemPrompt += fmt.Sprintf("\n\nYour memory directory is: %s\nYou can write files there to persist information for future runs of this task.", t.MemoryDir)
+	}
+
+	originalModel := a.Model
+	a.Model = model
+	defer func() { a.Model = originalModel }()
+
+	return a.runLoop(ctx, systemPrompt, userMessage)
+}
+
 // runLoop is the core agent loop. It sends the task to Claude, executes any
 // tool calls, feeds results back, and repeats until Claude responds with just text.
 func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage string) (*RunResult, error) {

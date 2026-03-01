@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/dneil5648/ductwork/pkg/agent"
@@ -13,15 +14,15 @@ import (
 	"github.com/dneil5648/ductwork/pkg/logging"
 	"github.com/dneil5648/ductwork/pkg/security"
 	task "github.com/dneil5648/ductwork/pkg/tasks"
+	"github.com/dneil5648/ductwork/pkg/worker"
 )
 
-// Orchestrator owns the task channel and spawns agents to execute tasks.
+// Orchestrator owns the task channel and dispatches tasks to a Worker.
 // It is the single consumer of the channel — both the scheduler and
 // immediate pushes (CLI, API) write to it.
 //
-// Instead of sharing a single Agent, the orchestrator creates a fresh Agent
-// per task execution. This avoids concurrency issues with the Enforcer
-// (which is task-specific) and keeps each execution isolated.
+// The Worker interface abstracts whether execution is local (in-process)
+// or remote (enqueued for a remote worker to pick up via HTTP).
 type Orchestrator struct {
 	TaskChan       chan task.Task
 	cfg            *config.Config
@@ -29,11 +30,13 @@ type Orchestrator struct {
 	depPrompt      string        // pre-rendered dependency info for system prompt
 	historyStore   history.Store // nil = no history recording
 	sem            chan struct{} // concurrency semaphore
+	worker         worker.Worker // executes tasks (local or remote)
 }
 
 // NewOrchestrator creates an orchestrator with a buffered task channel.
 // securityCfg, depCfg, and historyStore can be nil for backward compatibility.
-func NewOrchestrator(cfg *config.Config, securityCfg *security.SecurityConfig, depCfg *dependencies.DependencyConfig, historyStore history.Store, bufferSize int) *Orchestrator {
+// w is the Worker implementation (LocalWorker for standalone, RemoteWorker for control plane).
+func NewOrchestrator(cfg *config.Config, securityCfg *security.SecurityConfig, depCfg *dependencies.DependencyConfig, historyStore history.Store, w worker.Worker, bufferSize int) *Orchestrator {
 	depPrompt := ""
 	if depCfg != nil {
 		depPrompt = depCfg.ToSystemPrompt()
@@ -51,11 +54,12 @@ func NewOrchestrator(cfg *config.Config, securityCfg *security.SecurityConfig, d
 		depPrompt:      depPrompt,
 		historyStore:   historyStore,
 		sem:            make(chan struct{}, maxConcurrent),
+		worker:         w,
 	}
 }
 
 // newAgent creates a fresh Agent configured for a specific task.
-// Each task gets its own Enforcer with merged security rules.
+// Used by RunImmediate and SpawnAdhoc which always execute locally.
 func (o *Orchestrator) newAgent(taskName string) (*agent.Agent, error) {
 	a := &agent.Agent{
 		SystemPrompt:       o.cfg.SystemPrompt,
@@ -79,7 +83,7 @@ func (o *Orchestrator) newAgent(taskName string) (*agent.Agent, error) {
 }
 
 // Run is the main orchestrator loop. It should be run as a goroutine.
-// It reads tasks from the channel and spawns an agent goroutine for each one.
+// It reads tasks from the channel and dispatches them to the Worker.
 // The semaphore limits concurrent executions to MaxConcurrent.
 func (o *Orchestrator) Run(ctx context.Context) {
 	slog.Info("orchestrator started", "module", "orchestrator",
@@ -100,8 +104,8 @@ func (o *Orchestrator) Run(ctx context.Context) {
 	}
 }
 
-// executeTask runs a single task via a freshly created agent with retry logic
-// and history recording.
+// executeTask builds a TaskAssignment, dispatches it through the Worker,
+// and records the result in history.
 func (o *Orchestrator) executeTask(t task.Task) {
 	runID := fmt.Sprintf("%s-%d", t.Name, time.Now().UnixMilli())
 	ctx := logging.NewContext(context.Background(), t.Name, runID)
@@ -119,10 +123,10 @@ func (o *Orchestrator) executeTask(t task.Task) {
 	}
 	o.saveRecord(record)
 
-	// Create agent
-	a, err := o.newAgent(t.Name)
+	// Build the assignment with pre-loaded content
+	assignment, err := o.buildAssignment(runID, t)
 	if err != nil {
-		logger.Error("failed to create agent", "module", "orchestrator", "error", err)
+		logger.Error("failed to build assignment", "module", "orchestrator", "error", err)
 		o.finalizeRecord(record, start, nil, err, 0)
 		return
 	}
@@ -130,8 +134,7 @@ func (o *Orchestrator) executeTask(t task.Task) {
 	// Resolve retry config
 	retryCfg := o.resolveRetryConfig(t)
 
-	var result *agent.RunResult
-	var lastErr error
+	var lastResult worker.TaskResult
 	retriesDone := 0
 
 	for attempt := 0; attempt <= retryCfg.MaxRetries; attempt++ {
@@ -143,40 +146,103 @@ func (o *Orchestrator) executeTask(t task.Task) {
 			time.Sleep(wait)
 		}
 
-		result, lastErr = a.RunTask(ctx, t)
-		if lastErr == nil {
+		lastResult = o.worker.Execute(ctx, assignment)
+		if lastResult.Status == "completed" {
 			break // success
 		}
 
-		if !IsTransient(lastErr) {
-			logger.Info("non-transient error, not retrying", "error", lastErr)
+		if !isTransientResult(lastResult) {
+			logger.Info("non-transient error, not retrying", "error", lastResult.Error)
 			break
 		}
 
-		logger.Warn("transient error", "attempt", attempt, "error", lastErr)
+		logger.Warn("transient error", "attempt", attempt, "error", lastResult.Error)
 	}
 
-	o.finalizeRecord(record, start, result, lastErr, retriesDone)
+	// Convert TaskResult to RunResult for history finalization
+	var runResult *agent.RunResult
+	var runErr error
+	if lastResult.Status == "failed" {
+		runErr = fmt.Errorf("%s", lastResult.Error)
+	}
+	runResult = &agent.RunResult{
+		InputTokens:  lastResult.InputTokens,
+		OutputTokens: lastResult.OutputTokens,
+		Iterations:   lastResult.Iterations,
+	}
+
+	o.finalizeRecord(record, start, runResult, runErr, retriesDone)
 
 	elapsed := time.Since(start)
-	if lastErr != nil {
+	if runErr != nil {
 		logger.Error("task failed", "module", "orchestrator",
-			"elapsed", elapsed, "retries", retriesDone, "error", lastErr)
+			"elapsed", elapsed, "retries", retriesDone, "error", runErr)
 	} else {
-		logFields := []any{"module", "orchestrator", "elapsed", elapsed, "retries", retriesDone}
-		if result != nil {
-			logFields = append(logFields,
-				"input_tokens", result.InputTokens,
-				"output_tokens", result.OutputTokens,
-				"iterations", result.Iterations)
-		}
-		logger.Info("task completed", logFields...)
+		logger.Info("task completed", "module", "orchestrator",
+			"elapsed", elapsed, "retries", retriesDone,
+			"input_tokens", lastResult.InputTokens,
+			"output_tokens", lastResult.OutputTokens,
+			"iterations", lastResult.Iterations)
 	}
 }
 
+// buildAssignment constructs a TaskAssignment with pre-loaded skills, memory,
+// and resolved model/security settings.
+func (o *Orchestrator) buildAssignment(runID string, t task.Task) (worker.TaskAssignment, error) {
+	// Pre-load skills content
+	skillsContent, err := t.LoadSkills()
+	if err != nil {
+		return worker.TaskAssignment{}, fmt.Errorf("failed to load skills: %w", err)
+	}
+
+	// Pre-load memory content
+	memoryContent, err := t.LoadMemory()
+	if err != nil {
+		return worker.TaskAssignment{}, fmt.Errorf("failed to load memory: %w", err)
+	}
+
+	// Resolve model
+	model := o.cfg.DefaultModel
+	if t.Model != "" {
+		model = t.Model
+	}
+
+	// Resolve allowed tools from security config
+	allowedTools := o.resolveAllowedTools(t.Name)
+
+	return worker.TaskAssignment{
+		RunID:              runID,
+		Task:               t,
+		SystemPrompt:       o.cfg.SystemPrompt,
+		Model:              model,
+		DependenciesPrompt: o.depPrompt,
+		AllowedTools:       allowedTools,
+		SkillsContent:      skillsContent,
+		MemoryContent:      memoryContent,
+	}, nil
+}
+
+// resolveAllowedTools returns the effective tool list for a task,
+// merging global defaults with task-specific overrides.
+func (o *Orchestrator) resolveAllowedTools(taskName string) []string {
+	if o.securityConfig == nil {
+		return nil
+	}
+
+	tools := o.securityConfig.DefaultToolPermissions.AllowedTools
+
+	if override, ok := o.securityConfig.TaskOverrides[taskName]; ok {
+		if len(override.AllowedTools) > 0 {
+			tools = override.AllowedTools
+		}
+	}
+
+	return tools
+}
+
 // RunImmediate runs a defined task directly, bypassing the channel.
-// Blocks until the task completes. Used by CLI `agent run` and the API.
-// Does NOT go through the semaphore (user-initiated, should not be throttled).
+// Blocks until the task completes. Used by CLI `ductwork run` and the API.
+// Does NOT go through the semaphore or Worker interface (user-initiated, always local).
 func (o *Orchestrator) RunImmediate(ctx context.Context, t task.Task) (*agent.RunResult, error) {
 	logger := logging.FromContext(ctx)
 	start := time.Now()
@@ -200,7 +266,7 @@ func (o *Orchestrator) RunImmediate(ctx context.Context, t task.Task) (*agent.Ru
 }
 
 // SpawnAdhoc runs an ad-hoc task with a raw prompt string.
-// Blocks until complete. Used by CLI `agent spawn` and the API.
+// Blocks until complete. Used by CLI `ductwork spawn` and the API.
 func (o *Orchestrator) SpawnAdhoc(ctx context.Context, prompt string) (*agent.RunResult, error) {
 	slog.Info("spawning ad-hoc agent", "module", "orchestrator")
 
@@ -265,4 +331,22 @@ func (o *Orchestrator) resolveRetryConfig(t task.Task) RetryConfig {
 		MaxRetries:  maxRetries,
 		BaseBackoff: baseBackoff,
 	}
+}
+
+// isTransientResult checks if a failed TaskResult looks like a transient error
+// worth retrying. Uses string matching since the error crossed a boundary
+// (Worker interface or HTTP).
+func isTransientResult(r worker.TaskResult) bool {
+	if r.Status != "failed" {
+		return false
+	}
+	errMsg := r.Error
+	return strings.Contains(errMsg, "429") ||
+		strings.Contains(errMsg, "500") ||
+		strings.Contains(errMsg, "502") ||
+		strings.Contains(errMsg, "503") ||
+		strings.Contains(errMsg, "connection refused") ||
+		strings.Contains(errMsg, "connection reset") ||
+		strings.Contains(errMsg, "timeout") ||
+		strings.Contains(errMsg, "EOF")
 }

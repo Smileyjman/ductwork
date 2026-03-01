@@ -1,0 +1,26 @@
+services:
+  control:
+    build: .
+    command: ["start", "--mode=control"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./.agent:/app/.agent
+    environment:
+      - ANTHROPIC_API_KEY
+
+  worker-1:
+    build: .
+    command: ["start", "--mode=worker", "--control=http://control:8080", "--worker-id=worker-1"]
+    depends_on:
+      - control
+    environment:
+      - ANTHROPIC_API_KEY
+
+  worker-2:
+    build: .
+    command: ["start", "--mode=worker", "--control=http://control:8080", "--worker-id=worker-2"]
+    depends_on:
+      - control
+    environment:
+      - ANTHROPIC_API_KEY
