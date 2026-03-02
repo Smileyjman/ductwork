@@ -642,6 +642,7 @@ This produces validated, token-efficient tasks that work on first run.`,
 				}
 
 				// Test agent — no TestTaskFn (prevents recursive test_task calls)
+				// MaxIterations capped to prevent test runs from going infinite
 				testAgent := &agent.Agent{
 					SystemPrompt:       cfg.SystemPrompt,
 					Model:              cfg.DefaultModel,
@@ -651,6 +652,7 @@ This produces validated, token-efficient tasks that work on first run.`,
 					SkillsDir:          cfg.SkillsDir,
 					DependenciesPrompt: depCfg.ToSystemPrompt(),
 					ToolsFile:          cfg.ToolsFile,
+					MaxIterations:      15,
 				}
 
 				// Capture stdout during test run via os.Pipe
@@ -700,40 +702,33 @@ This produces validated, token-efficient tasks that work on first run.`,
 				return sb.String(), nil
 			}
 
-			// Build agent system prompt
-			buildPrompt := fmt.Sprintf(`You are a task builder agent. Your job is to create well-structured, tested task definitions from natural language descriptions.
+			// Build agent system prompt — highly prescriptive to minimize token waste
+			buildPrompt := fmt.Sprintf(`You are a task builder. Create a tested task definition from the user's description.
 
-You have access to these tools:
-- bash: Execute shell commands
-- read_file: Read files for reference
-- write_file: Write content to files
-- create_task: Create/update task definitions (use overwrite: "true" to update)
-- save_script: Save reusable scripts to .agent/scripts/ (executable, invokable via bash)
-- save_skill: Save reusable knowledge/patterns to .agent/skills/
+IMPORTANT: Be direct and efficient. Do NOT explore the filesystem or gather context unless absolutely necessary. Act immediately.
+
+## Tools
+- save_script: Save executable scripts to .agent/scripts/ (preferred for deterministic logic)
+- create_task: Create task definitions (use overwrite: "true" to update existing)
 - test_task: Test-run a task through the real execution pipeline
+- save_skill: Save reusable knowledge to .agent/skills/
+- bash: Run commands (use sparingly — prefer save_script for anything reusable)
+- read_file / write_file: File operations
 
-## Workflow
+## Steps (follow exactly)
 
-Follow this build-test-iterate process:
+1. Write scripts via save_script for deterministic logic (API calls, parsing, etc.)
+   Scripts path: %s/<name>  — use shebangs (#!/bin/bash or #!/usr/bin/env python3)
+2. Create the task via create_task with a prompt referencing scripts by full path
+   Set run_mode to "scheduled" (with schedule) or "immediate" (on-demand)
+3. Test via test_task — if it fails, fix scripts/prompt, overwrite, retest (max %d rounds)
+4. Optionally save_skill for patterns learned
 
-1. **Analyze** the user's description to understand what the task needs to do
-2. **Write scripts first** for any deterministic logic (API calls, data parsing, file operations).
-   Scripts go in .agent/scripts/ and are referenced in the task prompt by full path: %s/<script-name>
-   This saves tokens on future runs since the agent just calls the script instead of writing code each time.
-3. **Create the task** with create_task, writing a clear prompt that tells the executing agent exactly what to do.
-   Reference any scripts by their full path.
-4. **Test the task** with test_task to verify it works end-to-end
-5. **If the test fails**, read the error output, fix the scripts or task prompt, use create_task with overwrite: "true", and test again
-6. **Repeat** up to %d test rounds until the task passes
-7. **Save skills** for any reusable patterns or knowledge learned during the process
-
-## Guidelines
-
-- Scripts should have shebangs (#!/bin/bash or #!/usr/bin/env python3)
-- Task prompts should be clear and actionable — tell the agent what to do step by step
-- If a task needs to run on a schedule, set run_mode to "scheduled" with an appropriate interval
-- If it's on-demand, use run_mode "immediate"
-- Be concise. Create the task and test it. Don't over-explain.`, cfg.ScriptsDir, maxTestRounds)
+## Rules
+- Do NOT use bash to explore directories before acting — you already know the paths above
+- Do NOT use bash to write files — use save_script instead
+- Write the task prompt to be clear and step-by-step for the executing agent
+- If a tool call errors, try a DIFFERENT approach — do not repeat the same call`, cfg.ScriptsDir, maxTestRounds)
 
 			// Build agent gets ALL tools
 			enforcer := security.NewStaticEnforcer([]string{
@@ -742,14 +737,17 @@ Follow this build-test-iterate process:
 			})
 
 			a := &agent.Agent{
-				SystemPrompt: buildPrompt,
-				Model:        cfg.DefaultModel,
-				Enforcer:     enforcer,
-				TasksDir:     cfg.TasksDir,
-				ScriptsDir:   cfg.ScriptsDir,
-				SkillsDir:    cfg.SkillsDir,
-				ToolsFile:    cfg.ToolsFile,
-				TestTaskFn:   testTaskFn,
+				SystemPrompt:  buildPrompt,
+				Model:         cfg.DefaultModel,
+				Enforcer:      enforcer,
+				TasksDir:      cfg.TasksDir,
+				ScriptsDir:    cfg.ScriptsDir,
+				SkillsDir:     cfg.SkillsDir,
+				TestTaskFn:    testTaskFn,
+				MaxIterations: 25,
+				// NOTE: ToolsFile intentionally NOT set — build agent uses the
+				// embedded tools.json which has all 7 tools (including save_skill, test_task).
+				// Setting ToolsFile would load .agent/tools.json which may be stale.
 			}
 
 			ctx := context.Background()

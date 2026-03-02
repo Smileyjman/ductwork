@@ -55,6 +55,7 @@ type Agent struct {
 	SessionStore       *session.Store     // nil = no checkpointing (backward compat)
 	RunID              string             // checkpoint key — set by caller
 	TaskName           string             // stored in checkpoint for resume
+	MaxIterations      int                // 0 = unlimited (default); >0 = hard cap on loop iterations
 }
 
 // RunResult holds the outcome of an agent execution, including token usage.
@@ -229,8 +230,36 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 		}
 		// err just means no checkpoint exists — start fresh
 	}
+	consecutiveErrors := 0
+	const maxConsecutiveErrors = 3
+
 	for {
 		iteration++
+
+		// Hard iteration cap — prevents runaway loops
+		if a.MaxIterations > 0 && iteration > a.MaxIterations {
+			logger.Warn("max iterations reached", "max", a.MaxIterations)
+			// Save checkpoint before bailing so the run can be resumed
+			if a.SessionStore != nil && a.RunID != "" {
+				cp := &session.Checkpoint{
+					RunID:        a.RunID,
+					TaskName:     a.TaskName,
+					Iteration:    iteration - 1,
+					Messages:     messages,
+					SystemPrompt: systemPrompt,
+					InputTokens:  totalInputTokens,
+					OutputTokens: totalOutputTokens,
+					CreatedAt:    time.Now(),
+				}
+				_ = a.SessionStore.Save(cp)
+			}
+			return &RunResult{
+				InputTokens:  totalInputTokens,
+				OutputTokens: totalOutputTokens,
+				Iterations:   iteration - 1,
+			}, fmt.Errorf("agent reached max iterations (%d) without completing", a.MaxIterations)
+		}
+
 		logger.Debug("API call", "iteration", iteration)
 
 		// Call the Anthropic messages API
@@ -297,6 +326,7 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 
 		// Execute each tool call and build tool_result blocks
 		var toolResults []anthropic.ContentBlockParamUnion
+		iterationHadError := false
 
 		for _, call := range toolCalls {
 			// Parse the tool input JSON
@@ -305,6 +335,7 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 				toolResults = append(toolResults, anthropic.NewToolResultBlock(
 					call.ID, fmt.Sprintf("error parsing input: %v", err), true,
 				))
+				iterationHadError = true
 				continue
 			}
 
@@ -315,12 +346,53 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 				toolResults = append(toolResults, anthropic.NewToolResultBlock(
 					call.ID, fmt.Sprintf("error: %v", err), true,
 				))
+				iterationHadError = true
 			} else {
 				logger.Debug("tool result", "tool", call.Name, "result", truncate(result, 100))
 				toolResults = append(toolResults, anthropic.NewToolResultBlock(
 					call.ID, result, false,
 				))
 			}
+		}
+
+		// Track consecutive error iterations for early bail-out
+		if iterationHadError {
+			consecutiveErrors++
+			if consecutiveErrors >= maxConsecutiveErrors {
+				logger.Warn("too many consecutive tool errors, stopping agent",
+					"consecutive_errors", consecutiveErrors)
+				// Append tool results so conversation is consistent
+				messages = append(messages, anthropic.NewUserMessage(toolResults...))
+				// Add a nudge message so the model knows it must wrap up
+				messages = append(messages, anthropic.NewUserMessage(
+					anthropic.NewTextBlock("SYSTEM: You have hit the error budget — too many consecutive tool errors. Summarize what you accomplished and what failed, then stop. Do not call any more tools.")))
+				// One final API call to get a wrap-up response
+				wrapResp, wrapErr := client.Messages.New(ctx, anthropic.MessageNewParams{
+					Model:     anthropic.Model(a.Model),
+					MaxTokens: 2048,
+					System: []anthropic.TextBlockParam{
+						{Text: systemPrompt},
+					},
+					Messages: messages,
+					Tools:    sdkTools,
+				})
+				if wrapErr == nil {
+					totalInputTokens += wrapResp.Usage.InputTokens
+					totalOutputTokens += wrapResp.Usage.OutputTokens
+					for _, block := range wrapResp.Content {
+						if v, ok := block.AsAny().(anthropic.TextBlock); ok {
+							fmt.Println(v.Text)
+						}
+					}
+				}
+				return &RunResult{
+					InputTokens:  totalInputTokens,
+					OutputTokens: totalOutputTokens,
+					Iterations:   iteration,
+				}, fmt.Errorf("agent stopped after %d consecutive iterations with tool errors", consecutiveErrors)
+			}
+		} else {
+			consecutiveErrors = 0 // reset on any successful iteration
 		}
 
 		// Tool results go back as a "user" message (that's how the API expects it)
