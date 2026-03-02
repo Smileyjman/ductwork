@@ -66,6 +66,7 @@ func (o *Orchestrator) newAgent(taskName string) (*agent.Agent, error) {
 		Model:              o.cfg.DefaultModel,
 		TasksDir:           o.cfg.TasksDir,
 		ScriptsDir:         o.cfg.ScriptsDir,
+		SkillsDir:          o.cfg.SkillsDir,
 		DependenciesPrompt: o.depPrompt,
 		ToolsFile:          o.cfg.ToolsFile,
 	}

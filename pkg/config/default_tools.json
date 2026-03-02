@@ -82,6 +82,26 @@
         "register_scheduled": {
           "type": "string",
           "description": "If 'true' and task is scheduled, register it with the running scheduler immediately"
+        },
+        "overwrite": {
+          "type": "string",
+          "description": "If 'true', overwrite an existing task with the same name instead of erroring"
+        },
+        "skills": {
+          "type": "string",
+          "description": "JSON object mapping skill name to file path (e.g. {\"api-patterns\": \"skills/api-patterns.md\"})"
+        },
+        "allowed_tools": {
+          "type": "string",
+          "description": "JSON array of tool names this task is allowed to use (e.g. [\"bash\", \"read_file\"])"
+        },
+        "max_retries": {
+          "type": "string",
+          "description": "Maximum number of retry attempts on failure (e.g. '3')"
+        },
+        "retry_backoff": {
+          "type": "string",
+          "description": "Base duration between retries (e.g. '2s', '5s')"
         }
       },
       "required": ["name", "description", "prompt", "run_mode"]
@@ -107,6 +127,38 @@
         }
       },
       "required": ["name", "content"]
+    }
+  },
+  {
+    "name": "save_skill",
+    "description": "Save a reusable skill (markdown knowledge file) to the skills directory. Skills are injected into the system prompt when a task references them, providing learned knowledge for future runs.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Skill filename (e.g. 'api-error-handling.md', 'deployment-checklist.md')"
+        },
+        "content": {
+          "type": "string",
+          "description": "Skill content in markdown format — patterns, procedures, or knowledge learned during task execution"
+        }
+      },
+      "required": ["name", "content"]
+    }
+  },
+  {
+    "name": "test_task",
+    "description": "Test-run a task through the real execution pipeline. Loads the task from disk, runs it with a fresh agent, and returns the result (PASSED/FAILED with output and token usage). Use this after creating a task to verify it works before finalizing.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "task_name": {
+          "type": "string",
+          "description": "The name of the task to test (must exist in the tasks directory)"
+        }
+      },
+      "required": ["task_name"]
     }
   }
 ]

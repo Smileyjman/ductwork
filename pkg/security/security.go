@@ -44,7 +44,7 @@ type BashRules struct {
 func DefaultSecurityConfig() *SecurityConfig {
 	return &SecurityConfig{
 		DefaultToolPermissions: ToolPermissions{
-			AllowedTools: []string{"bash", "read_file", "write_file", "create_task", "save_script"},
+			AllowedTools: []string{"bash", "read_file", "write_file", "create_task", "save_script", "save_skill", "test_task"},
 		},
 		TaskOverrides: map[string]TaskSecurity{},
 	}

@@ -47,8 +47,10 @@ type Agent struct {
 	Enforcer           *security.Enforcer // nil = no restrictions (backward compat)
 	TasksDir           string             // path to .agent/tasks/ for create_task tool
 	ScriptsDir         string             // path to .agent/scripts/ for save_script tool
+	SkillsDir          string             // path to .agent/skills/ for save_skill tool
 	DependenciesPrompt string             // dependency info injected into system prompt
 	ToolsFile          string             // path to .agent/tools.json (empty = use embedded default)
+	TestTaskFn         func(ctx context.Context, taskName string) (string, error) // closure for test_task tool
 }
 
 // RunResult holds the outcome of an agent execution, including token usage.
@@ -280,7 +282,7 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 			}
 
 			// Execute the tool
-			result, err := a.executeTool(call.Name, input)
+			result, err := a.executeTool(ctx, call.Name, input)
 			if err != nil {
 				logger.Error("tool failed", "tool", call.Name, "error", err)
 				toolResults = append(toolResults, anthropic.NewToolResultBlock(
@@ -301,7 +303,7 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 
 // executeTool dispatches a tool call to the right function based on name.
 // Security checks are enforced before each tool execution.
-func (a *Agent) executeTool(name string, input map[string]interface{}) (string, error) {
+func (a *Agent) executeTool(ctx context.Context, name string, input map[string]interface{}) (string, error) {
 	// Security gate: check tool permission
 	if a.Enforcer != nil {
 		if err := a.Enforcer.CheckTool(name); err != nil {
@@ -363,6 +365,12 @@ func (a *Agent) executeTool(name string, input map[string]interface{}) (string, 
 	case "save_script":
 		return a.executeSaveScript(input)
 
+	case "save_skill":
+		return a.executeSaveSkill(input)
+
+	case "test_task":
+		return a.executeTestTask(ctx, input)
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
@@ -416,6 +424,51 @@ func (a *Agent) executeSaveScript(input map[string]interface{}) (string, error) 
 	}
 
 	return fmt.Sprintf("Script saved to %s (executable)", scriptPath), nil
+}
+
+// executeSaveSkill writes a skill file (markdown) to the skills directory.
+// Skills are reusable knowledge that gets injected into task system prompts.
+func (a *Agent) executeSaveSkill(input map[string]interface{}) (string, error) {
+	if a.SkillsDir == "" {
+		return "", fmt.Errorf("save_skill: skills directory not configured")
+	}
+
+	name, ok := input["name"].(string)
+	if !ok || name == "" {
+		return "", fmt.Errorf("save_skill: missing or invalid 'name' field")
+	}
+
+	content, ok := input["content"].(string)
+	if !ok || content == "" {
+		return "", fmt.Errorf("save_skill: missing or invalid 'content' field")
+	}
+
+	// Ensure skills directory exists
+	if err := os.MkdirAll(a.SkillsDir, 0755); err != nil {
+		return "", fmt.Errorf("save_skill: failed to create skills dir: %w", err)
+	}
+
+	skillPath := filepath.Join(a.SkillsDir, name)
+	if err := os.WriteFile(skillPath, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("save_skill: failed to write skill: %w", err)
+	}
+
+	return fmt.Sprintf("Skill saved to %s", skillPath), nil
+}
+
+// executeTestTask runs a task through the real execution path and returns
+// the result. Used by the build agent to validate tasks after creation.
+func (a *Agent) executeTestTask(ctx context.Context, input map[string]interface{}) (string, error) {
+	if a.TestTaskFn == nil {
+		return "", fmt.Errorf("test_task: not available in this context")
+	}
+
+	taskName, ok := input["task_name"].(string)
+	if !ok || taskName == "" {
+		return "", fmt.Errorf("test_task: missing or invalid 'task_name' field")
+	}
+
+	return a.TestTaskFn(ctx, taskName)
 }
 
 // Tool implementations

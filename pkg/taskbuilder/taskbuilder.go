@@ -70,10 +70,56 @@ func ValidateAndCreate(input map[string]interface{}, tasksDir string) (task.Task
 		t.MemoryDir = memoryDir
 	}
 
-	// Check for name collisions
+	// Skills: map of skill name → file path
+	if skillsRaw, ok := input["skills"]; ok && skillsRaw != nil {
+		if skillsMap, ok := skillsRaw.(map[string]interface{}); ok {
+			t.Skills = make(map[string]string, len(skillsMap))
+			for k, v := range skillsMap {
+				if vs, ok := v.(string); ok {
+					t.Skills[k] = vs
+				}
+			}
+		}
+	}
+
+	// Allowed tools: per-task tool whitelist
+	if toolsRaw, ok := input["allowed_tools"]; ok && toolsRaw != nil {
+		if toolsList, ok := toolsRaw.([]interface{}); ok {
+			for _, v := range toolsList {
+				if vs, ok := v.(string); ok {
+					t.AllowedTools = append(t.AllowedTools, vs)
+				}
+			}
+		}
+	}
+
+	// Max retries
+	if retriesRaw, ok := input["max_retries"]; ok && retriesRaw != nil {
+		switch v := retriesRaw.(type) {
+		case float64:
+			t.MaxRetries = int(v)
+		case int:
+			t.MaxRetries = v
+		}
+	}
+
+	// Retry backoff
+	if backoff, ok := input["retry_backoff"].(string); ok && backoff != "" {
+		t.RetryBackoff = backoff
+	}
+
+	// Check for name collisions (unless overwrite is set)
 	outPath := filepath.Join(tasksDir, name+".json")
-	if _, err := os.Stat(outPath); err == nil {
-		return task.Task{}, "", fmt.Errorf("task %q already exists at %s", name, outPath)
+	overwrite := false
+	if ow, ok := input["overwrite"].(bool); ok {
+		overwrite = ow
+	} else if ow, ok := input["overwrite"].(string); ok && ow == "true" {
+		overwrite = true
+	}
+	if !overwrite {
+		if _, err := os.Stat(outPath); err == nil {
+			return task.Task{}, "", fmt.Errorf("task %q already exists at %s (use overwrite: true to replace)", name, outPath)
+		}
 	}
 
 	// Ensure tasks directory exists

@@ -30,6 +30,7 @@ func (w *LocalWorker) Execute(ctx context.Context, assignment TaskAssignment) Ta
 		DependenciesPrompt: assignment.DependenciesPrompt,
 		TasksDir:           w.cfg.TasksDir,
 		ScriptsDir:         w.cfg.ScriptsDir,
+		SkillsDir:          w.cfg.SkillsDir,
 		ToolsFile:          w.cfg.ToolsFile,
 	}
 

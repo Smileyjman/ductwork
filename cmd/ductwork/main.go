@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -388,6 +389,7 @@ func runCmd() *cobra.Command {
 				Enforcer:           enforcer,
 				TasksDir:           cfg.TasksDir,
 				ScriptsDir:         cfg.ScriptsDir,
+				SkillsDir:          cfg.SkillsDir,
 				DependenciesPrompt: depCfg.ToSystemPrompt(),
 				ToolsFile:          cfg.ToolsFile,
 			}
@@ -467,6 +469,7 @@ func spawnCmd() *cobra.Command {
 				Enforcer:           enforcer,
 				TasksDir:           cfg.TasksDir,
 				ScriptsDir:         cfg.ScriptsDir,
+				SkillsDir:          cfg.SkillsDir,
 				DependenciesPrompt: depCfg.ToSystemPrompt(),
 				ToolsFile:          cfg.ToolsFile,
 			}
@@ -530,20 +533,38 @@ func listCmd() *cobra.Command {
 	}
 }
 
-// buildCmd starts a specialized agent session focused on task creation.
-// The agent gets a tailored system prompt and restricted tools (create_task + read_file only).
+// buildCmd starts a build-test-iterate pipeline for task creation.
+// The build agent writes scripts for deterministic logic, creates the task,
+// test-runs it through the real execution path, fixes failures, and saves skills.
 func buildCmd() *cobra.Command {
-	return &cobra.Command{
+	var model string
+	var maxTestRounds int
+
+	cmd := &cobra.Command{
 		Use:   "build [description]",
-		Short: "Build a new task definition using an AI agent",
-		Long:  "Starts an agent session that creates a task definition from a natural language description. The agent only has access to create_task and read_file tools.",
-		Args:  cobra.ExactArgs(1),
+		Short: "Build, test, and optimize a new task definition using an AI agent",
+		Long: `Starts an AI agent that builds a task from a natural language description.
+
+The build agent follows a build-test-iterate workflow:
+  1. Analyzes the requirement and writes scripts for deterministic logic
+  2. Creates a task definition referencing those scripts
+  3. Test-runs the task through the real execution pipeline
+  4. If the test fails, fixes the task/scripts and retries
+  5. Saves reusable skills learned during the process
+
+This produces validated, token-efficient tasks that work on first run.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			description := args[0]
 
 			cfg, err := config.LoadConfig(agentDir)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			// CLI --model flag takes highest priority
+			if model != "" {
+				cfg.DefaultModel = model
 			}
 
 			// Setup logging
@@ -553,25 +574,145 @@ func buildCmd() *cobra.Command {
 			}
 			defer cleanup()
 
-			// Specialized system prompt for task building
-			buildPrompt := `You are a task builder agent. Your job is to create well-structured task definitions from natural language descriptions.
+			// Load security config for test agent
+			secCfg, err := security.LoadSecurityConfig(cfg.SecurityFile)
+			if err != nil {
+				return fmt.Errorf("failed to load security config: %w", err)
+			}
 
-You have access to:
-- create_task: Create a new task JSON definition
-- read_file: Read existing files for reference
+			// Load dependency config
+			depCfg, err := dependencies.LoadDependencies(cfg.DependenciesFile)
+			if err != nil {
+				return fmt.Errorf("failed to load dependencies config: %w", err)
+			}
 
-When building a task:
-1. Parse the user's description to understand the task's purpose
-2. Choose an appropriate name (lowercase kebab-case, e.g. 'health-check')
-3. Write a clear, actionable prompt that tells the executing agent exactly what to do
-4. Decide if this is a scheduled or immediate task
-5. If scheduled, pick an appropriate interval
-6. Use create_task to save the definition
+			// TestTaskFn closure — runs a task through the real execution path
+			// and captures the output for the build agent to review.
+			testTaskFn := func(ctx context.Context, taskName string) (string, error) {
+				// Load task fresh from disk (picks up any overwrites)
+				taskPath := filepath.Join(cfg.TasksDir, taskName+".json")
+				t, err := task.LoadTask(taskPath)
+				if err != nil {
+					return "", fmt.Errorf("failed to load task %q: %w", taskName, err)
+				}
 
-Be concise and create the task directly. Don't over-explain.`
+				// Resolve memory_dir relative to .agent/ root
+				if t.MemoryDir != "" && !filepath.IsAbs(t.MemoryDir) {
+					t.MemoryDir = filepath.Join(cfg.RootDir, t.MemoryDir)
+				}
 
-			// Restricted enforcer — only create_task and read_file
-			enforcer := security.NewStaticEnforcer([]string{"create_task", "read_file"})
+				// Resolve skill paths relative to .agent/ root
+				for name, path := range t.Skills {
+					if !filepath.IsAbs(path) {
+						t.Skills[name] = filepath.Join(cfg.RootDir, path)
+					}
+				}
+
+				// Create per-task enforcer for the test run
+				enforcer, err := security.NewEnforcer(secCfg, taskName)
+				if err != nil {
+					return "", fmt.Errorf("failed to create enforcer: %w", err)
+				}
+
+				// Test agent — no TestTaskFn (prevents recursive test_task calls)
+				testAgent := &agent.Agent{
+					SystemPrompt:       cfg.SystemPrompt,
+					Model:              cfg.DefaultModel,
+					Enforcer:           enforcer,
+					TasksDir:           cfg.TasksDir,
+					ScriptsDir:         cfg.ScriptsDir,
+					SkillsDir:          cfg.SkillsDir,
+					DependenciesPrompt: depCfg.ToSystemPrompt(),
+					ToolsFile:          cfg.ToolsFile,
+				}
+
+				// Capture stdout during test run via os.Pipe
+				oldStdout := os.Stdout
+				r, w, err := os.Pipe()
+				if err != nil {
+					return "", fmt.Errorf("failed to create pipe: %w", err)
+				}
+				os.Stdout = w
+
+				// 5-minute timeout for test runs
+				testCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+				defer cancel()
+
+				result, runErr := testAgent.RunTask(testCtx, t)
+
+				// Restore stdout and read captured output
+				w.Close()
+				os.Stdout = oldStdout
+				capturedBytes := make([]byte, 0)
+				buf := make([]byte, 4096)
+				for {
+					n, err := r.Read(buf)
+					if n > 0 {
+						capturedBytes = append(capturedBytes, buf[:n]...)
+					}
+					if err != nil {
+						break
+					}
+					// Cap captured output at 10KB to avoid huge context
+					if len(capturedBytes) > 10*1024 {
+						capturedBytes = append(capturedBytes[:10*1024], []byte("\n... (output truncated)")...)
+						break
+					}
+				}
+				r.Close()
+				captured := string(capturedBytes)
+
+				// Format result
+				var sb fmt.Stringer = &testResultFormatter{
+					taskName: taskName,
+					result:   result,
+					err:      runErr,
+					output:   captured,
+				}
+
+				return sb.String(), nil
+			}
+
+			// Build agent system prompt
+			buildPrompt := fmt.Sprintf(`You are a task builder agent. Your job is to create well-structured, tested task definitions from natural language descriptions.
+
+You have access to these tools:
+- bash: Execute shell commands
+- read_file: Read files for reference
+- write_file: Write content to files
+- create_task: Create/update task definitions (use overwrite: "true" to update)
+- save_script: Save reusable scripts to .agent/scripts/ (executable, invokable via bash)
+- save_skill: Save reusable knowledge/patterns to .agent/skills/
+- test_task: Test-run a task through the real execution pipeline
+
+## Workflow
+
+Follow this build-test-iterate process:
+
+1. **Analyze** the user's description to understand what the task needs to do
+2. **Write scripts first** for any deterministic logic (API calls, data parsing, file operations).
+   Scripts go in .agent/scripts/ and are referenced in the task prompt by full path: %s/<script-name>
+   This saves tokens on future runs since the agent just calls the script instead of writing code each time.
+3. **Create the task** with create_task, writing a clear prompt that tells the executing agent exactly what to do.
+   Reference any scripts by their full path.
+4. **Test the task** with test_task to verify it works end-to-end
+5. **If the test fails**, read the error output, fix the scripts or task prompt, use create_task with overwrite: "true", and test again
+6. **Repeat** up to %d test rounds until the task passes
+7. **Save skills** for any reusable patterns or knowledge learned during the process
+
+## Guidelines
+
+- Scripts should have shebangs (#!/bin/bash or #!/usr/bin/env python3)
+- Task prompts should be clear and actionable — tell the agent what to do step by step
+- If a task needs to run on a schedule, set run_mode to "scheduled" with an appropriate interval
+- If it's on-demand, use run_mode "immediate"
+- Be concise. Create the task and test it. Don't over-explain.`, cfg.ScriptsDir, maxTestRounds)
+
+			// Build agent gets ALL tools
+			enforcer := security.NewStaticEnforcer([]string{
+				"bash", "read_file", "write_file", "create_task",
+				"save_script", "save_skill", "test_task",
+			})
 
 			a := &agent.Agent{
 				SystemPrompt: buildPrompt,
@@ -579,20 +720,62 @@ Be concise and create the task directly. Don't over-explain.`
 				Enforcer:     enforcer,
 				TasksDir:     cfg.TasksDir,
 				ScriptsDir:   cfg.ScriptsDir,
+				SkillsDir:    cfg.SkillsDir,
+				ToolsFile:    cfg.ToolsFile,
+				TestTaskFn:   testTaskFn,
 			}
 
 			ctx := context.Background()
-			slog.Info("starting task builder", "description", description)
+			slog.Info("starting task builder", "description", description, "max_test_rounds", maxTestRounds)
 
 			prompt := fmt.Sprintf("Build a task for the following: %s", description)
-			if _, err := a.Spawn(ctx, prompt); err != nil {
+			result, err := a.Spawn(ctx, prompt)
+			if err != nil {
 				return fmt.Errorf("build failed: %w", err)
 			}
 
-			slog.Info("task builder finished")
+			if result != nil {
+				slog.Info("task builder finished",
+					"input_tokens", result.InputTokens,
+					"output_tokens", result.OutputTokens,
+					"iterations", result.Iterations)
+			}
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&model, "model", "", "Override default model (e.g. claude-sonnet-4-6, claude-haiku-3)")
+	cmd.Flags().IntVar(&maxTestRounds, "max-test-rounds", 3, "Maximum number of test-fix-retest iterations")
+	return cmd
+}
+
+// testResultFormatter formats test run results for the build agent.
+type testResultFormatter struct {
+	taskName string
+	result   *agent.RunResult
+	err      error
+	output   string
+}
+
+func (f *testResultFormatter) String() string {
+	var sb strings.Builder
+
+	if f.err != nil {
+		sb.WriteString(fmt.Sprintf("## Test Result: FAILED\n\nTask: %s\nError: %s\n", f.taskName, f.err))
+	} else {
+		sb.WriteString(fmt.Sprintf("## Test Result: PASSED\n\nTask: %s\n", f.taskName))
+	}
+
+	if f.result != nil {
+		sb.WriteString(fmt.Sprintf("\nToken Usage: %d input, %d output (%d iterations)\n",
+			f.result.InputTokens, f.result.OutputTokens, f.result.Iterations))
+	}
+
+	if f.output != "" {
+		sb.WriteString(fmt.Sprintf("\n### Agent Output\n\n%s\n", f.output))
+	}
+
+	return sb.String()
 }
 
 // historyCmd shows recent run history

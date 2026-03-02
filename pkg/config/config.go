@@ -51,6 +51,8 @@ func DefaultConfig() Config {
 - write_file: Write content to files
 - create_task: Create new task definitions
 - save_script: Save reusable scripts
+- save_skill: Save reusable knowledge/skills for future task runs
+- test_task: Test-run a task to verify it works
 
 Use these tools to accomplish your tasks. Be methodical and verify your work.`,
 		TasksDir:         "tasks",
@@ -134,7 +136,7 @@ func Init(dir string) error {
 	// Write default security.json
 	secData := []byte(`{
   "default_tool_permissions": {
-    "allowed_tools": ["bash", "read_file", "write_file", "create_task", "save_script"]
+    "allowed_tools": ["bash", "read_file", "write_file", "create_task", "save_script", "save_skill", "test_task"]
   },
   "task_overrides": {}
 }
