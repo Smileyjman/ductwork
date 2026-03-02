@@ -62,13 +62,14 @@ func NewOrchestrator(cfg *config.Config, securityCfg *security.SecurityConfig, d
 // Used by RunImmediate and SpawnAdhoc which always execute locally.
 func (o *Orchestrator) newAgent(taskName string) (*agent.Agent, error) {
 	a := &agent.Agent{
-		SystemPrompt:       o.cfg.SystemPrompt,
-		Model:              o.cfg.DefaultModel,
-		TasksDir:           o.cfg.TasksDir,
-		ScriptsDir:         o.cfg.ScriptsDir,
-		SkillsDir:          o.cfg.SkillsDir,
-		DependenciesPrompt: o.depPrompt,
-		ToolsFile:          o.cfg.ToolsFile,
+		SystemPrompt:               o.cfg.SystemPrompt,
+		Model:                      o.cfg.DefaultModel,
+		TasksDir:                   o.cfg.TasksDir,
+		ScriptsDir:                 o.cfg.ScriptsDir,
+		SkillsDir:                  o.cfg.SkillsDir,
+		DependenciesPrompt:         o.depPrompt,
+		ToolsFile:                  o.cfg.ToolsFile,
+		ContextCompactionThreshold: o.cfg.ContextCompactionThreshold,
 	}
 
 	// Create per-task Enforcer if security config exists
@@ -212,15 +213,16 @@ func (o *Orchestrator) buildAssignment(runID string, t task.Task) (worker.TaskAs
 	allowedTools := o.resolveAllowedTools(t.Name)
 
 	return worker.TaskAssignment{
-		RunID:              runID,
-		Task:               t,
-		SystemPrompt:       o.cfg.SystemPrompt,
-		Model:              model,
-		DependenciesPrompt: o.depPrompt,
-		AllowedTools:       allowedTools,
-		SkillsContent:      skillsContent,
-		MemoryContent:      memoryContent,
-		SessionsDir:        o.cfg.SessionsDir,
+		RunID:                      runID,
+		Task:                       t,
+		SystemPrompt:               o.cfg.SystemPrompt,
+		Model:                      model,
+		DependenciesPrompt:         o.depPrompt,
+		AllowedTools:               allowedTools,
+		SkillsContent:              skillsContent,
+		MemoryContent:              memoryContent,
+		SessionsDir:                o.cfg.SessionsDir,
+		ContextCompactionThreshold: o.cfg.ContextCompactionThreshold,
 	}, nil
 }
 

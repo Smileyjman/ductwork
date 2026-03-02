@@ -26,7 +26,8 @@ type TaskAssignment struct {
 	AllowedTools       []string  `json:"allowed_tools"`
 	SkillsContent      string    `json:"skills_content"`  // pre-loaded skill text
 	MemoryContent      string    `json:"memory_content"`  // pre-loaded memory text
-	SessionsDir        string    `json:"sessions_dir"`    // path to sessions dir for checkpointing
+	SessionsDir                string `json:"sessions_dir"`                 // path to sessions dir for checkpointing
+	ContextCompactionThreshold int    `json:"context_compaction_threshold"` // 0=default, -1=disabled, >0=custom
 }
 
 // TaskResult is what a worker produces after executing a task.

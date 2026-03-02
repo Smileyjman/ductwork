@@ -26,15 +26,16 @@ func NewLocalWorker(cfg *config.Config, secCfg *security.SecurityConfig) *LocalW
 // Execute runs a task locally using a fresh Agent instance.
 func (w *LocalWorker) Execute(ctx context.Context, assignment TaskAssignment) TaskResult {
 	a := &agent.Agent{
-		SystemPrompt:       assignment.SystemPrompt,
-		Model:              assignment.Model,
-		DependenciesPrompt: assignment.DependenciesPrompt,
-		TasksDir:           w.cfg.TasksDir,
-		ScriptsDir:         w.cfg.ScriptsDir,
-		SkillsDir:          w.cfg.SkillsDir,
-		ToolsFile:          w.cfg.ToolsFile,
-		RunID:              assignment.RunID,
-		TaskName:           assignment.Task.Name,
+		SystemPrompt:               assignment.SystemPrompt,
+		Model:                      assignment.Model,
+		DependenciesPrompt:         assignment.DependenciesPrompt,
+		TasksDir:                   w.cfg.TasksDir,
+		ScriptsDir:                 w.cfg.ScriptsDir,
+		SkillsDir:                  w.cfg.SkillsDir,
+		ToolsFile:                  w.cfg.ToolsFile,
+		RunID:                      assignment.RunID,
+		TaskName:                   assignment.Task.Name,
+		ContextCompactionThreshold: w.cfg.ContextCompactionThreshold,
 	}
 
 	// Wire up session store for checkpointing

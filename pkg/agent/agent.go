@@ -55,7 +55,8 @@ type Agent struct {
 	SessionStore       *session.Store     // nil = no checkpointing (backward compat)
 	RunID              string             // checkpoint key — set by caller
 	TaskName           string             // stored in checkpoint for resume
-	MaxIterations      int                // 0 = unlimited (default); >0 = hard cap on loop iterations
+	MaxIterations              int  // 0 = unlimited (default); >0 = hard cap on loop iterations
+	ContextCompactionThreshold int  // 0=default(100k), -1=disabled, >0=custom token threshold
 }
 
 // RunResult holds the outcome of an agent execution, including token usage.
@@ -63,6 +64,7 @@ type RunResult struct {
 	InputTokens  int64
 	OutputTokens int64
 	Iterations   int
+	Compactions  int // number of context compactions performed
 }
 
 // Spawn runs the agent loop with a raw task string.
@@ -230,6 +232,11 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 		}
 		// err just means no checkpoint exists — start fresh
 	}
+
+	// Context compaction setup
+	compactionThreshold := resolveCompactionThreshold(a.ContextCompactionThreshold)
+	compactions := 0
+
 	consecutiveErrors := 0
 	const maxConsecutiveErrors = 3
 
@@ -257,6 +264,7 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 				InputTokens:  totalInputTokens,
 				OutputTokens: totalOutputTokens,
 				Iterations:   iteration - 1,
+				Compactions:  compactions,
 			}, fmt.Errorf("agent reached max iterations (%d) without completing", a.MaxIterations)
 		}
 
@@ -282,6 +290,24 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 		logger.Debug("token usage", "iteration", iteration,
 			"input_tokens", response.Usage.InputTokens,
 			"output_tokens", response.Usage.OutputTokens)
+
+		// Context compaction: if input tokens exceed threshold, summarize old messages
+		if compactionThreshold > 0 && response.Usage.InputTokens > int64(compactionThreshold) {
+			oldLen := len(messages)
+			compacted, sumIn, sumOut, compErr := compactContext(ctx, client, a.Model, messages, userMessage)
+			if compErr != nil {
+				logger.Warn("context compaction failed, continuing with full context", "error", compErr)
+			} else if len(compacted) < oldLen {
+				messages = compacted
+				totalInputTokens += sumIn
+				totalOutputTokens += sumOut
+				compactions++
+				logger.Info("context compacted",
+					"old_messages", oldLen,
+					"new_messages", len(messages),
+					"input_tokens_before", response.Usage.InputTokens)
+			}
+		}
 
 		// Walk through the response content blocks.
 		// Each block is either text (Claude talking) or tool_use (Claude wants to run a tool).
@@ -317,6 +343,7 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 				InputTokens:  totalInputTokens,
 				OutputTokens: totalOutputTokens,
 				Iterations:   iteration,
+				Compactions:  compactions,
 			}
 			logger.Info("agent loop complete", "iterations", iteration,
 				"total_input_tokens", totalInputTokens,
@@ -389,6 +416,7 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 					InputTokens:  totalInputTokens,
 					OutputTokens: totalOutputTokens,
 					Iterations:   iteration,
+					Compactions:  compactions,
 				}, fmt.Errorf("agent stopped after %d consecutive iterations with tool errors", consecutiveErrors)
 			}
 		} else {
@@ -683,4 +711,161 @@ func splitLines(s string) []string {
 		lines = append(lines, s[start:])
 	}
 	return lines
+}
+
+// --- Context compaction ---
+
+const (
+	defaultCompactionThreshold = 100000 // 100k tokens (~50% of 200k context window)
+	compactionKeepMessages     = 6      // keep last 6 messages (3 iteration cycles) verbatim
+	maxSummarizationInput      = 50000  // max chars of old conversation to send for summarization
+	maxToolResultChars         = 500    // truncate individual tool results in summarization input
+)
+
+// resolveCompactionThreshold returns the effective token threshold.
+// 0 → default (100k), -1 → disabled, >0 → custom value.
+func resolveCompactionThreshold(configured int) int {
+	switch {
+	case configured < 0:
+		return -1 // disabled
+	case configured == 0:
+		return defaultCompactionThreshold
+	default:
+		return configured
+	}
+}
+
+// compactContext summarizes old messages to reduce context size.
+// Keeps the last K messages verbatim and replaces everything before them
+// with a single UserMessage containing the original prompt + a summary.
+// Returns the compacted messages array and token usage from the summarization call.
+func compactContext(
+	ctx context.Context,
+	client anthropic.Client,
+	model string,
+	messages []anthropic.MessageParam,
+	originalPrompt string,
+) ([]anthropic.MessageParam, int64, int64, error) {
+	// Need enough messages to make compaction worthwhile
+	minMessages := compactionKeepMessages + 2
+	if len(messages) <= minMessages {
+		return messages, 0, 0, nil // not enough to compact
+	}
+
+	// Split into old (to summarize) and recent (to keep verbatim)
+	splitIdx := len(messages) - compactionKeepMessages
+
+	// Ensure split point lands on an assistant message boundary
+	// (messages alternate: user, assistant, user, assistant, ...)
+	// We want recentMessages to start with an assistant message so that
+	// when prepended with a user summary message, alternation is valid.
+	if splitIdx > 0 && messages[splitIdx].Role != anthropic.MessageParamRoleAssistant {
+		splitIdx--
+	}
+	if splitIdx <= 0 {
+		return messages, 0, 0, nil
+	}
+
+	oldMessages := messages[:splitIdx]
+	recentMessages := messages[splitIdx:]
+
+	// Extract text from old messages for summarization
+	conversationText := extractMessagesText(oldMessages)
+	if len(conversationText) > maxSummarizationInput {
+		conversationText = conversationText[:maxSummarizationInput] + "\n... (truncated)"
+	}
+
+	// Summarize via API call
+	summaryPrompt := fmt.Sprintf(`Summarize this agent conversation history concisely. Preserve:
+- Key decisions and reasoning
+- Files created, modified, or read (with paths)
+- Errors encountered and how they were resolved
+- Current state and what remains to be done
+
+Be brief — this summary replaces the detailed history.
+
+CONVERSATION:
+%s`, conversationText)
+
+	resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.Model(model),
+		MaxTokens: 2048,
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(summaryPrompt)),
+		},
+	})
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("summarization API call failed: %w", err)
+	}
+
+	// Extract summary text from response
+	var summary string
+	for _, block := range resp.Content {
+		if v, ok := block.AsAny().(anthropic.TextBlock); ok {
+			summary += v.Text
+		}
+	}
+
+	if summary == "" {
+		return nil, resp.Usage.InputTokens, resp.Usage.OutputTokens,
+			fmt.Errorf("summarization returned empty response")
+	}
+
+	// Build compacted messages array:
+	// [1] UserMessage with original prompt + summary (replaces all old messages)
+	// [K] Recent messages kept verbatim
+	compactedPrompt := fmt.Sprintf("Original task: %s\n\n--- CONTEXT SUMMARY (from previous iterations) ---\n\n%s",
+		originalPrompt, summary)
+
+	compacted := make([]anthropic.MessageParam, 0, 1+len(recentMessages))
+	compacted = append(compacted, anthropic.NewUserMessage(anthropic.NewTextBlock(compactedPrompt)))
+	compacted = append(compacted, recentMessages...)
+
+	return compacted, resp.Usage.InputTokens, resp.Usage.OutputTokens, nil
+}
+
+// extractMessagesText walks the messages array and extracts human-readable text
+// for the summarization prompt. Tool results are truncated to keep the input compact.
+func extractMessagesText(messages []anthropic.MessageParam) string {
+	var sb fmt.Stringer = &messagesTextExtractor{messages: messages}
+	return sb.String()
+}
+
+type messagesTextExtractor struct {
+	messages []anthropic.MessageParam
+}
+
+func (e *messagesTextExtractor) String() string {
+	var result string
+	for _, msg := range e.messages {
+		role := string(msg.Role)
+		for _, block := range msg.Content {
+			if block.OfText != nil {
+				text := block.OfText.Text
+				if len(text) > maxToolResultChars*2 {
+					text = text[:maxToolResultChars*2] + "..."
+				}
+				result += fmt.Sprintf("[%s] %s\n", role, text)
+			} else if block.OfToolUse != nil {
+				result += fmt.Sprintf("[%s] tool_call: %s\n", role, block.OfToolUse.Name)
+			} else if block.OfToolResult != nil {
+				// Extract text from tool result content
+				toolText := ""
+				for _, c := range block.OfToolResult.Content {
+					if c.OfText != nil {
+						toolText += c.OfText.Text
+					}
+				}
+				if len(toolText) > maxToolResultChars {
+					toolText = toolText[:maxToolResultChars] + "..."
+				}
+				isErr := ""
+				if block.OfToolResult.IsError.Value {
+					isErr = " (ERROR)"
+				}
+				result += fmt.Sprintf("[%s] tool_result%s: %s\n", role, isErr, toolText)
+			}
+		}
+	}
+	return result
 }

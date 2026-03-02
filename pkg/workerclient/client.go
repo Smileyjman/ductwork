@@ -150,12 +150,13 @@ func (c *Client) executeTask(ctx context.Context, assignment worker.TaskAssignme
 	}
 
 	a := &agent.Agent{
-		SystemPrompt:       assignment.SystemPrompt,
-		Model:              assignment.Model,
-		DependenciesPrompt: assignment.DependenciesPrompt,
-		Enforcer:           enforcer,
-		RunID:              assignment.RunID,
-		TaskName:           assignment.Task.Name,
+		SystemPrompt:               assignment.SystemPrompt,
+		Model:                      assignment.Model,
+		DependenciesPrompt:         assignment.DependenciesPrompt,
+		Enforcer:                   enforcer,
+		RunID:                      assignment.RunID,
+		TaskName:                   assignment.Task.Name,
+		ContextCompactionThreshold: assignment.ContextCompactionThreshold,
 	}
 
 	// Wire up session store for checkpointing on remote workers

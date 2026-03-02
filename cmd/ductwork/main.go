@@ -394,16 +394,17 @@ func runCmd() *cobra.Command {
 			}
 
 			a := &agent.Agent{
-				SystemPrompt:       cfg.SystemPrompt,
-				Model:              cfg.DefaultModel,
-				Enforcer:           enforcer,
-				TasksDir:           cfg.TasksDir,
-				ScriptsDir:         cfg.ScriptsDir,
-				SkillsDir:          cfg.SkillsDir,
-				DependenciesPrompt: depCfg.ToSystemPrompt(),
-				ToolsFile:          cfg.ToolsFile,
-				RunID:              runID,
-				TaskName:           taskName,
+				SystemPrompt:               cfg.SystemPrompt,
+				Model:                      cfg.DefaultModel,
+				Enforcer:                   enforcer,
+				TasksDir:                   cfg.TasksDir,
+				ScriptsDir:                 cfg.ScriptsDir,
+				SkillsDir:                  cfg.SkillsDir,
+				DependenciesPrompt:         depCfg.ToSystemPrompt(),
+				ToolsFile:                  cfg.ToolsFile,
+				RunID:                      runID,
+				TaskName:                   taskName,
+				ContextCompactionThreshold: cfg.ContextCompactionThreshold,
 			}
 			if sessErr == nil {
 				a.SessionStore = sessStore
@@ -486,16 +487,17 @@ func spawnCmd() *cobra.Command {
 			}
 
 			a := &agent.Agent{
-				SystemPrompt:       cfg.SystemPrompt,
-				Model:              cfg.DefaultModel,
-				Enforcer:           enforcer,
-				TasksDir:           cfg.TasksDir,
-				ScriptsDir:         cfg.ScriptsDir,
-				SkillsDir:          cfg.SkillsDir,
-				DependenciesPrompt: depCfg.ToSystemPrompt(),
-				ToolsFile:          cfg.ToolsFile,
-				RunID:              runID,
-				TaskName:           "",
+				SystemPrompt:               cfg.SystemPrompt,
+				Model:                      cfg.DefaultModel,
+				Enforcer:                   enforcer,
+				TasksDir:                   cfg.TasksDir,
+				ScriptsDir:                 cfg.ScriptsDir,
+				SkillsDir:                  cfg.SkillsDir,
+				DependenciesPrompt:         depCfg.ToSystemPrompt(),
+				ToolsFile:                  cfg.ToolsFile,
+				RunID:                      runID,
+				TaskName:                   "",
+				ContextCompactionThreshold: cfg.ContextCompactionThreshold,
 			}
 			if sessErr == nil {
 				a.SessionStore = sessStore
@@ -644,15 +646,16 @@ This produces validated, token-efficient tasks that work on first run.`,
 				// Test agent — no TestTaskFn (prevents recursive test_task calls)
 				// MaxIterations capped to prevent test runs from going infinite
 				testAgent := &agent.Agent{
-					SystemPrompt:       cfg.SystemPrompt,
-					Model:              cfg.DefaultModel,
-					Enforcer:           enforcer,
-					TasksDir:           cfg.TasksDir,
-					ScriptsDir:         cfg.ScriptsDir,
-					SkillsDir:          cfg.SkillsDir,
-					DependenciesPrompt: depCfg.ToSystemPrompt(),
-					ToolsFile:          cfg.ToolsFile,
-					MaxIterations:      15,
+					SystemPrompt:               cfg.SystemPrompt,
+					Model:                      cfg.DefaultModel,
+					Enforcer:                   enforcer,
+					TasksDir:                   cfg.TasksDir,
+					ScriptsDir:                 cfg.ScriptsDir,
+					SkillsDir:                  cfg.SkillsDir,
+					DependenciesPrompt:         depCfg.ToSystemPrompt(),
+					ToolsFile:                  cfg.ToolsFile,
+					MaxIterations:              15,
+					ContextCompactionThreshold: -1, // disabled — test runs are short
 				}
 
 				// Capture stdout during test run via os.Pipe
@@ -737,14 +740,15 @@ IMPORTANT: Be direct and efficient. Do NOT explore the filesystem or gather cont
 			})
 
 			a := &agent.Agent{
-				SystemPrompt:  buildPrompt,
-				Model:         cfg.DefaultModel,
-				Enforcer:      enforcer,
-				TasksDir:      cfg.TasksDir,
-				ScriptsDir:    cfg.ScriptsDir,
-				SkillsDir:     cfg.SkillsDir,
-				TestTaskFn:    testTaskFn,
-				MaxIterations: 25,
+				SystemPrompt:               buildPrompt,
+				Model:                      cfg.DefaultModel,
+				Enforcer:                   enforcer,
+				TasksDir:                   cfg.TasksDir,
+				ScriptsDir:                 cfg.ScriptsDir,
+				SkillsDir:                  cfg.SkillsDir,
+				TestTaskFn:                 testTaskFn,
+				MaxIterations:              25,
+				ContextCompactionThreshold: cfg.ContextCompactionThreshold,
 				// NOTE: ToolsFile intentionally NOT set — build agent uses the
 				// embedded tools.json which has all 7 tools (including save_skill, test_task).
 				// Setting ToolsFile would load .agent/tools.json which may be stale.
@@ -925,17 +929,18 @@ Run 'ductwork sessions' to see available checkpoints.`,
 			}
 
 			a := &agent.Agent{
-				SystemPrompt:       cfg.SystemPrompt,
-				Model:              cfg.DefaultModel,
-				Enforcer:           enforcer,
-				TasksDir:           cfg.TasksDir,
-				ScriptsDir:         cfg.ScriptsDir,
-				SkillsDir:          cfg.SkillsDir,
-				DependenciesPrompt: depCfg.ToSystemPrompt(),
-				ToolsFile:          cfg.ToolsFile,
-				SessionStore:       sessStore,
-				RunID:              runID,
-				TaskName:           cp.TaskName,
+				SystemPrompt:               cfg.SystemPrompt,
+				Model:                      cfg.DefaultModel,
+				Enforcer:                   enforcer,
+				TasksDir:                   cfg.TasksDir,
+				ScriptsDir:                 cfg.ScriptsDir,
+				SkillsDir:                  cfg.SkillsDir,
+				DependenciesPrompt:         depCfg.ToSystemPrompt(),
+				ToolsFile:                  cfg.ToolsFile,
+				SessionStore:               sessStore,
+				RunID:                      runID,
+				TaskName:                   cp.TaskName,
+				ContextCompactionThreshold: cfg.ContextCompactionThreshold,
 			}
 
 			ctx := context.Background()

@@ -32,6 +32,9 @@ type Config struct {
 	DefaultMaxRetries   int    `json:"default_max_retries"`   // default: 2
 	DefaultRetryBackoff string `json:"default_retry_backoff"` // default: "2s"
 
+	// Context compaction: 0 = use default (100k tokens), -1 = disabled, >0 = custom threshold
+	ContextCompactionThreshold int `json:"context_compaction_threshold"` // default: 0 (=100k)
+
 	// Config file paths (resolved at load time)
 	ToolsFile        string `json:"tools_file"`        // default: "tools.json"
 	SecurityFile     string `json:"security_file"`     // default: "security.json"
