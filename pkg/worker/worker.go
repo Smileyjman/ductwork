@@ -24,8 +24,9 @@ type TaskAssignment struct {
 	Model              string    `json:"model"`
 	DependenciesPrompt string    `json:"dependencies_prompt"`
 	AllowedTools       []string  `json:"allowed_tools"`
-	SkillsContent      string    `json:"skills_content"` // pre-loaded skill text
-	MemoryContent      string    `json:"memory_content"` // pre-loaded memory text
+	SkillsContent      string    `json:"skills_content"`  // pre-loaded skill text
+	MemoryContent      string    `json:"memory_content"`  // pre-loaded memory text
+	SessionsDir        string    `json:"sessions_dir"`    // path to sessions dir for checkpointing
 }
 
 // TaskResult is what a worker produces after executing a task.

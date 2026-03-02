@@ -23,6 +23,7 @@ type Config struct {
 	LogsDir      string `json:"logs_dir"`      // default: "logs"
 	ScriptsDir   string `json:"scripts_dir"`   // default: "scripts"
 	HistoryDir   string `json:"history_dir"`   // default: "history"
+	SessionsDir  string `json:"sessions_dir"`  // default: "sessions"
 	APIPort      int    `json:"api_port"`      // default: 8080
 	Debug        bool   `json:"debug"`         // default: false
 
@@ -61,6 +62,7 @@ Use these tools to accomplish your tasks. Be methodical and verify your work.`,
 		LogsDir:          "logs",
 		ScriptsDir:          "scripts",
 		HistoryDir:          "history",
+		SessionsDir:         "sessions",
 		APIPort:             8080,
 		Debug:               false,
 		MaxConcurrent:       5,
@@ -105,6 +107,7 @@ func Init(dir string) error {
 		filepath.Join(absDir, "skills"),
 		filepath.Join(absDir, "scripts"),
 		filepath.Join(absDir, "history"),
+		filepath.Join(absDir, "sessions"),
 		filepath.Join(absDir, "memory"),
 		filepath.Join(absDir, "logs"),
 	}
@@ -190,6 +193,15 @@ func LoadConfig(agentDir string) (*Config, error) {
 		cfg.DefaultModel = envModel
 	}
 
+	// Backfill defaults for fields missing from older config files
+	defaults := DefaultConfig()
+	if cfg.SessionsDir == "" {
+		cfg.SessionsDir = defaults.SessionsDir
+	}
+	if cfg.HistoryDir == "" {
+		cfg.HistoryDir = defaults.HistoryDir
+	}
+
 	// Resolve relative paths to absolute
 	cfg.RootDir = absDir
 	cfg.TasksDir = filepath.Join(absDir, cfg.TasksDir)
@@ -198,6 +210,7 @@ func LoadConfig(agentDir string) (*Config, error) {
 	cfg.LogsDir = filepath.Join(absDir, cfg.LogsDir)
 	cfg.ScriptsDir = filepath.Join(absDir, cfg.ScriptsDir)
 	cfg.HistoryDir = filepath.Join(absDir, cfg.HistoryDir)
+	cfg.SessionsDir = filepath.Join(absDir, cfg.SessionsDir)
 	cfg.ToolsFile = filepath.Join(absDir, cfg.ToolsFile)
 	cfg.SecurityFile = filepath.Join(absDir, cfg.SecurityFile)
 	cfg.DependenciesFile = filepath.Join(absDir, cfg.DependenciesFile)

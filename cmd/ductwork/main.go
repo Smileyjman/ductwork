@@ -21,6 +21,7 @@ import (
 	"github.com/dneil5648/ductwork/pkg/orchestrator"
 	"github.com/dneil5648/ductwork/pkg/scheduler"
 	"github.com/dneil5648/ductwork/pkg/security"
+	"github.com/dneil5648/ductwork/pkg/session"
 	task "github.com/dneil5648/ductwork/pkg/tasks"
 	"github.com/dneil5648/ductwork/pkg/worker"
 	"github.com/dneil5648/ductwork/pkg/workerclient"
@@ -45,6 +46,8 @@ func main() {
 	rootCmd.AddCommand(listCmd())
 	rootCmd.AddCommand(buildCmd())
 	rootCmd.AddCommand(historyCmd())
+	rootCmd.AddCommand(resumeCmd())
+	rootCmd.AddCommand(sessionsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -383,6 +386,13 @@ func runCmd() *cobra.Command {
 				return fmt.Errorf("failed to create enforcer: %w", err)
 			}
 
+			// Session store for checkpointing
+			runID := fmt.Sprintf("run-%s-%d", taskName, time.Now().UnixMilli())
+			sessStore, sessErr := session.NewStore(cfg.SessionsDir)
+			if sessErr != nil {
+				slog.Warn("session store unavailable, running without checkpoints", "error", sessErr)
+			}
+
 			a := &agent.Agent{
 				SystemPrompt:       cfg.SystemPrompt,
 				Model:              cfg.DefaultModel,
@@ -392,10 +402,15 @@ func runCmd() *cobra.Command {
 				SkillsDir:          cfg.SkillsDir,
 				DependenciesPrompt: depCfg.ToSystemPrompt(),
 				ToolsFile:          cfg.ToolsFile,
+				RunID:              runID,
+				TaskName:           taskName,
+			}
+			if sessErr == nil {
+				a.SessionStore = sessStore
 			}
 
 			ctx := context.Background()
-			slog.Info("running task", "task", t.Name)
+			slog.Info("running task", "task", t.Name, "run_id", runID)
 			result, err := a.RunTask(ctx, t)
 			if err != nil {
 				return fmt.Errorf("task failed: %w", err)
@@ -463,6 +478,13 @@ func spawnCmd() *cobra.Command {
 				return fmt.Errorf("failed to create enforcer: %w", err)
 			}
 
+			// Session store for checkpointing
+			runID := fmt.Sprintf("adhoc-%d", time.Now().UnixMilli())
+			sessStore, sessErr := session.NewStore(cfg.SessionsDir)
+			if sessErr != nil {
+				slog.Warn("session store unavailable, running without checkpoints", "error", sessErr)
+			}
+
 			a := &agent.Agent{
 				SystemPrompt:       cfg.SystemPrompt,
 				Model:              cfg.DefaultModel,
@@ -472,10 +494,15 @@ func spawnCmd() *cobra.Command {
 				SkillsDir:          cfg.SkillsDir,
 				DependenciesPrompt: depCfg.ToSystemPrompt(),
 				ToolsFile:          cfg.ToolsFile,
+				RunID:              runID,
+				TaskName:           "",
+			}
+			if sessErr == nil {
+				a.SessionStore = sessStore
 			}
 
 			ctx := context.Background()
-			slog.Info("spawning agent")
+			slog.Info("spawning agent", "run_id", runID)
 			result, err := a.Spawn(ctx, prompt)
 			if err != nil {
 				return fmt.Errorf("agent failed: %w", err)
@@ -825,6 +852,191 @@ func historyCmd() *cobra.Command {
 					r.InputTokens, r.OutputTokens, errStr)
 			}
 
+			return nil
+		},
+	}
+}
+
+// resumeCmd resumes a failed run from its last checkpoint.
+func resumeCmd() *cobra.Command {
+	var model string
+
+	cmd := &cobra.Command{
+		Use:   "resume [run-id]",
+		Short: "Resume a failed run from its last checkpoint",
+		Long: `Resumes a task execution from where it left off. Uses saved conversation
+state to skip already-completed iterations, saving tokens and time.
+
+Run 'ductwork sessions' to see available checkpoints.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runID := args[0]
+
+			cfg, err := config.LoadConfig(agentDir)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			// CLI --model flag takes highest priority
+			if model != "" {
+				cfg.DefaultModel = model
+			}
+
+			// Setup logging
+			cleanup, err := logging.Setup(cfg.LogsDir, cfg.Debug)
+			if err != nil {
+				return fmt.Errorf("failed to setup logging: %w", err)
+			}
+			defer cleanup()
+
+			// Load checkpoint
+			sessStore, err := session.NewStore(cfg.SessionsDir)
+			if err != nil {
+				return fmt.Errorf("failed to open session store: %w", err)
+			}
+
+			cp, err := sessStore.Load(runID)
+			if err != nil {
+				return fmt.Errorf("no checkpoint found for run %q: %w", runID, err)
+			}
+
+			fmt.Printf("Resuming run %s (failed at iteration %d, %d tokens used)\n",
+				runID, cp.Iteration, cp.InputTokens+cp.OutputTokens)
+
+			// Load security config
+			secCfg, err := security.LoadSecurityConfig(cfg.SecurityFile)
+			if err != nil {
+				return fmt.Errorf("failed to load security config: %w", err)
+			}
+
+			// Load dependency config
+			depCfg, err := dependencies.LoadDependencies(cfg.DependenciesFile)
+			if err != nil {
+				return fmt.Errorf("failed to load dependencies config: %w", err)
+			}
+
+			// Determine task name for enforcer
+			taskName := cp.TaskName
+			if taskName == "" {
+				taskName = "adhoc"
+			}
+
+			enforcer, err := security.NewEnforcer(secCfg, taskName)
+			if err != nil {
+				return fmt.Errorf("failed to create enforcer: %w", err)
+			}
+
+			a := &agent.Agent{
+				SystemPrompt:       cfg.SystemPrompt,
+				Model:              cfg.DefaultModel,
+				Enforcer:           enforcer,
+				TasksDir:           cfg.TasksDir,
+				ScriptsDir:         cfg.ScriptsDir,
+				SkillsDir:          cfg.SkillsDir,
+				DependenciesPrompt: depCfg.ToSystemPrompt(),
+				ToolsFile:          cfg.ToolsFile,
+				SessionStore:       sessStore,
+				RunID:              runID,
+				TaskName:           cp.TaskName,
+			}
+
+			ctx := context.Background()
+
+			// If this was a named task, load and run it (gets skills, memory, etc.)
+			if cp.TaskName != "" {
+				taskPath := filepath.Join(cfg.TasksDir, cp.TaskName+".json")
+				t, err := task.LoadTask(taskPath)
+				if err != nil {
+					return fmt.Errorf("failed to load task %q: %w", cp.TaskName, err)
+				}
+
+				// Resolve paths
+				if t.MemoryDir != "" && !filepath.IsAbs(t.MemoryDir) {
+					t.MemoryDir = filepath.Join(cfg.RootDir, t.MemoryDir)
+				}
+				for name, path := range t.Skills {
+					if !filepath.IsAbs(path) {
+						t.Skills[name] = filepath.Join(cfg.RootDir, path)
+					}
+				}
+
+				slog.Info("resuming task", "task", t.Name, "run_id", runID,
+					"from_iteration", cp.Iteration)
+				result, err := a.RunTask(ctx, t)
+				if err != nil {
+					return fmt.Errorf("task failed: %w", err)
+				}
+
+				if result != nil {
+					fmt.Printf("\nResumed run complete: %d input tokens, %d output tokens, %d iterations\n",
+						result.InputTokens, result.OutputTokens, result.Iterations)
+				}
+			} else {
+				// Ad-hoc task — use a dummy prompt (runLoop will restore from checkpoint)
+				slog.Info("resuming adhoc task", "run_id", runID,
+					"from_iteration", cp.Iteration)
+				result, err := a.Spawn(ctx, "(resuming from checkpoint)")
+				if err != nil {
+					return fmt.Errorf("agent failed: %w", err)
+				}
+
+				if result != nil {
+					fmt.Printf("\nResumed run complete: %d input tokens, %d output tokens, %d iterations\n",
+						result.InputTokens, result.OutputTokens, result.Iterations)
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&model, "model", "", "Override default model (e.g. claude-sonnet-4-6, claude-haiku-3)")
+	return cmd
+}
+
+// sessionsCmd lists available session checkpoints for resume.
+func sessionsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sessions",
+		Short: "List resumable session checkpoints",
+		Long:  "Shows all saved session checkpoints from failed or interrupted runs. Use 'ductwork resume <run-id>' to continue.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadConfig(agentDir)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			sessStore, err := session.NewStore(cfg.SessionsDir)
+			if err != nil {
+				return fmt.Errorf("failed to open session store: %w", err)
+			}
+
+			checkpoints, err := sessStore.List()
+			if err != nil {
+				return fmt.Errorf("failed to list sessions: %w", err)
+			}
+
+			if len(checkpoints) == 0 {
+				fmt.Println("No session checkpoints found.")
+				return nil
+			}
+
+			fmt.Printf("%-40s %-20s %-10s %-12s %s\n",
+				"RUN ID", "TASK", "ITERATION", "TOKENS", "SAVED AT")
+			fmt.Printf("%-40s %-20s %-10s %-12s %s\n",
+				"------", "----", "---------", "------", "--------")
+			for _, cp := range checkpoints {
+				taskName := cp.TaskName
+				if taskName == "" {
+					taskName = "(adhoc)"
+				}
+				totalTokens := cp.InputTokens + cp.OutputTokens
+				fmt.Printf("%-40s %-20s %-10d %-12d %s\n",
+					cp.RunID, taskName, cp.Iteration, totalTokens,
+					cp.CreatedAt.Format("2006-01-02 15:04:05"))
+			}
+
+			fmt.Printf("\nResume with: ductwork resume <run-id>\n")
 			return nil
 		},
 	}

@@ -38,6 +38,7 @@ type Store interface {
 	Save(record *RunRecord) error
 	GetByTask(taskName string, limit int) ([]RunRecord, error)
 	GetRecent(limit int) ([]RunRecord, error)
+	GetByRunID(runID string) (*RunRecord, error)
 }
 
 // FileStore is a file-based Store implementation.
@@ -90,6 +91,22 @@ func (s *FileStore) GetRecent(limit int) ([]RunRecord, error) {
 	}
 	sortByTime(all)
 	return head(all, limit), nil
+}
+
+// GetByRunID reads a single run record by its ID.
+func (s *FileStore) GetByRunID(runID string) (*RunRecord, error) {
+	path := filepath.Join(s.dir, runID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("run record not found: %s", runID)
+	}
+
+	var r RunRecord
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("failed to parse run record: %w", err)
+	}
+
+	return &r, nil
 }
 
 // loadAll reads all run records from the directory.

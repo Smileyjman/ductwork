@@ -220,6 +220,7 @@ func (o *Orchestrator) buildAssignment(runID string, t task.Task) (worker.TaskAs
 		AllowedTools:       allowedTools,
 		SkillsContent:      skillsContent,
 		MemoryContent:      memoryContent,
+		SessionsDir:        o.cfg.SessionsDir,
 	}, nil
 }
 

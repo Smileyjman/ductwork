@@ -11,6 +11,7 @@ import (
 
 	"github.com/dneil5648/ductwork/pkg/agent"
 	"github.com/dneil5648/ductwork/pkg/security"
+	"github.com/dneil5648/ductwork/pkg/session"
 	"github.com/dneil5648/ductwork/pkg/worker"
 )
 
@@ -153,6 +154,16 @@ func (c *Client) executeTask(ctx context.Context, assignment worker.TaskAssignme
 		Model:              assignment.Model,
 		DependenciesPrompt: assignment.DependenciesPrompt,
 		Enforcer:           enforcer,
+		RunID:              assignment.RunID,
+		TaskName:           assignment.Task.Name,
+	}
+
+	// Wire up session store for checkpointing on remote workers
+	if assignment.SessionsDir != "" {
+		sessStore, err := session.NewStore(assignment.SessionsDir)
+		if err == nil {
+			a.SessionStore = sessStore
+		}
 	}
 
 	// Use RunTaskWithPreloaded — receives skills/memory content directly

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dneil5648/ductwork/pkg/logging"
 	"github.com/dneil5648/ductwork/pkg/security"
+	"github.com/dneil5648/ductwork/pkg/session"
 	"github.com/dneil5648/ductwork/pkg/taskbuilder"
 	task "github.com/dneil5648/ductwork/pkg/tasks"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -51,6 +52,9 @@ type Agent struct {
 	DependenciesPrompt string             // dependency info injected into system prompt
 	ToolsFile          string             // path to .agent/tools.json (empty = use embedded default)
 	TestTaskFn         func(ctx context.Context, taskName string) (string, error) // closure for test_task tool
+	SessionStore       *session.Store     // nil = no checkpointing (backward compat)
+	RunID              string             // checkpoint key — set by caller
+	TaskName           string             // stored in checkpoint for resume
 }
 
 // RunResult holds the outcome of an agent execution, including token usage.
@@ -209,6 +213,22 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 
 	// Agent loop — runs until the model stops calling tools
 	iteration := 0
+
+	// Restore from checkpoint if available (session persistence)
+	if a.SessionStore != nil && a.RunID != "" {
+		if cp, err := a.SessionStore.Load(a.RunID); err == nil {
+			messages = cp.Messages
+			totalInputTokens = cp.InputTokens
+			totalOutputTokens = cp.OutputTokens
+			iteration = cp.Iteration
+			logger.Info("resuming from checkpoint",
+				"run_id", a.RunID,
+				"iteration", iteration,
+				"messages", len(messages),
+				"tokens_used", totalInputTokens+totalOutputTokens)
+		}
+		// err just means no checkpoint exists — start fresh
+	}
 	for {
 		iteration++
 		logger.Debug("API call", "iteration", iteration)
@@ -257,6 +277,13 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 
 		// If there were no tool calls, the agent is done
 		if len(toolCalls) == 0 {
+			// Clean up checkpoint on successful completion
+			if a.SessionStore != nil && a.RunID != "" {
+				if err := a.SessionStore.Delete(a.RunID); err != nil {
+					logger.Warn("failed to delete checkpoint", "error", err)
+				}
+			}
+
 			result := &RunResult{
 				InputTokens:  totalInputTokens,
 				OutputTokens: totalOutputTokens,
@@ -298,6 +325,25 @@ func (a *Agent) runLoop(ctx context.Context, systemPrompt string, userMessage st
 
 		// Tool results go back as a "user" message (that's how the API expects it)
 		messages = append(messages, anthropic.NewUserMessage(toolResults...))
+
+		// Save checkpoint after each iteration (non-fatal on failure)
+		if a.SessionStore != nil && a.RunID != "" {
+			cp := &session.Checkpoint{
+				RunID:        a.RunID,
+				TaskName:     a.TaskName,
+				Iteration:    iteration,
+				Messages:     messages,
+				SystemPrompt: systemPrompt,
+				InputTokens:  totalInputTokens,
+				OutputTokens: totalOutputTokens,
+				CreatedAt:    time.Now(),
+			}
+			if err := a.SessionStore.Save(cp); err != nil {
+				logger.Warn("failed to save checkpoint", "iteration", iteration, "error", err)
+			} else {
+				logger.Debug("checkpoint saved", "iteration", iteration)
+			}
+		}
 	}
 }
 

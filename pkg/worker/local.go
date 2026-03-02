@@ -7,6 +7,7 @@ import (
 	"github.com/dneil5648/ductwork/pkg/agent"
 	"github.com/dneil5648/ductwork/pkg/config"
 	"github.com/dneil5648/ductwork/pkg/security"
+	"github.com/dneil5648/ductwork/pkg/session"
 )
 
 // LocalWorker executes tasks in the same process using a real Agent.
@@ -32,6 +33,17 @@ func (w *LocalWorker) Execute(ctx context.Context, assignment TaskAssignment) Ta
 		ScriptsDir:         w.cfg.ScriptsDir,
 		SkillsDir:          w.cfg.SkillsDir,
 		ToolsFile:          w.cfg.ToolsFile,
+		RunID:              assignment.RunID,
+		TaskName:           assignment.Task.Name,
+	}
+
+	// Wire up session store for checkpointing
+	if assignment.SessionsDir != "" {
+		sessStore, err := session.NewStore(assignment.SessionsDir)
+		if err == nil {
+			a.SessionStore = sessStore
+		}
+		// Non-fatal: if session store fails, continue without checkpointing
 	}
 
 	// Create per-task Enforcer if security config exists
