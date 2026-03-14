@@ -1,6 +1,0 @@
-{
-  "default_tool_permissions": {
-    "allowed_tools": ["bash", "read_file", "write_file", "create_task", "save_script"]
-  },
-  "task_overrides": {}
-}
